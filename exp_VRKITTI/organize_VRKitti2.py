@@ -16,7 +16,7 @@ os.makedirs(export_root, exist_ok=True)
 
 seqnums = [1, 2, 6, 18, 20]
 secennames = ['morning', 'sunset']
-contents_to_copy = ['depth', 'forwardFlow', 'instanceSegmentation', 'rgb', 'textgt']
+contents_to_copy = ['depth', 'forwardFlow', 'backwardFlow', 'instanceSegmentation', 'rgb', 'textgt']
 
 for seqnum in seqnums:
     for secenname in secennames:
@@ -48,11 +48,13 @@ for split in ['evaluation', 'training']:
 
     for k, c, pngidx in img_lists:
         flowimg_path = os.path.join(export_root, "Scene{}".format(str(k).zfill(2)), c, 'frames', 'forwardFlow', 'Camera_0', "flow_{}.png".format(str(pngidx).zfill(5)))
+        flowimg_back_path = os.path.join(export_root, "Scene{}".format(str(k).zfill(2)), c, 'frames', 'backwardFlow', 'Camera_0', "flow_{}.png".format(str(pngidx).zfill(5)))
         rgb_path1 = os.path.join(export_root, "Scene{}".format(str(k).zfill(2)), c, 'frames', 'rgb', 'Camera_0', "rgb_{}.jpg".format(str(pngidx).zfill(5)))
         rgb_path2 = os.path.join(export_root, "Scene{}".format(str(k).zfill(2)), c, 'frames', 'rgb', 'Camera_0', "rgb_{}.jpg".format(str(pngidx + 1).zfill(5)))
 
         try:
             Image.open(flowimg_path).verify()
+            Image.open(flowimg_back_path).verify()
             Image.open(rgb_path1).verify()
             Image.open(rgb_path2).verify()
         except:

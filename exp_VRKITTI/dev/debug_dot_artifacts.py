@@ -21,7 +21,7 @@ import math
 import tqdm
 
 from core.utils.frame_utils import read_gen, readFlowVRKitti
-from exp_VRKitti.dataset_VRKitti2 import VirtualKITTI2
+from exp_VRKITTI.dataset_VRKitti2 import VirtualKITTI2
 from core.utils.utils import tensor2disp, tensor2rgb
 
 def read_splits(project_rootdir):
@@ -171,12 +171,12 @@ def occ_detect_c_numba(epp1, epp2, pts2dsrch_v1_batch, pts2d_v1_batch, pts2d_v2_
                         dot_prodt2 = np.sum(vec1_v2 * vec2_v2)
 
                         if dot_prodt1 * dot_prodt2 < 0:
-                            if np.sqrt(np.sum((pts_dst_v2 - pts_src_v2) ** 2)) < minoc_dist:
+                            if np.sqrt(np.sum((pts_dst_v2 - pts_src_v2) ** 2)) < minoc_dist[y, x, 0]:
                                 occ_selector[int(pts_ss[i, 1].item()), int(pts_ss[i, 0].item())] = True
 
     return occ_selector
 
-def occ_detect_c(intrinsic, pose, depthmap, minoc_dist=3):
+def occ_detect_c(intrinsic, pose, depthmap, minoc_dist_ratio=3):
     h, w = depthmap.shape
     minsr_dist = 1
     pose_pr = np.copy(pose)
@@ -213,7 +213,26 @@ def occ_detect_c(intrinsic, pose, depthmap, minoc_dist=3):
     pts2dsrch_v1_batch = pts2dsrch_v1_batch[:, :, 0:2, 0]
 
     seach_distance = np.sqrt(np.sum((pts2dsrch_v1_batch - pts2d_v1_batch) ** 2, axis=2))
-    return occ_detect_c_numba(epp1.astype(np.float32), epp2.astype(np.float32), pts2dsrch_v1_batch.astype(np.float32), pts2d_v1_batch.astype(np.float32), pts2d_v2_batch.astype(np.float32), seach_distance.astype(np.float32), out_range_selecor, occ_selector, minsr_dist, minoc_dist, w=w, h=h)
+
+    eppl_param = np.stack([-(pts2d_v1_batch[:, :, 1] - epp1[1]), pts2d_v1_batch[:, :, 0] - epp1[0]], axis=2)
+    eppl_param = eppl_param / np.sqrt(np.sum(eppl_param ** 2, axis=2, keepdims=True))
+    pts3d_v1_batch_pos = np.stack([(xx + 0.5 * eppl_param[:, :, 0]) * depthmap, (yy + 0.5 * eppl_param[:, :, 1]) * depthmap, depthmap, ones], axis=2)
+    pts3d_v1_batch_pos = np.expand_dims(pts3d_v1_batch_pos, axis=3)
+    pts3d_v2_batch_pos = intrinsic @ pose @ np.linalg.inv(intrinsic) @ pts3d_v1_batch_pos
+    pts2d_v2_batch_pos = np.copy(pts3d_v2_batch_pos)
+    pts2d_v2_batch_pos[:, :, 0, 0] = pts2d_v2_batch_pos[:, :, 0, 0] / pts2d_v2_batch_pos[:, :, 2, 0]
+    pts2d_v2_batch_pos[:, :, 1, 0] = pts2d_v2_batch_pos[:, :, 1, 0] / pts2d_v2_batch_pos[:, :, 2, 0]
+    pts2d_v2_batch_pos = pts2d_v2_batch_pos[:, :, 0:2, 0]
+    pts3d_v1_batch_neg = np.stack([(xx - 0.5 * eppl_param[:, :, 0]) * depthmap, (yy - 0.5 * eppl_param[:, :, 1]) * depthmap, depthmap, ones], axis=2)
+    pts3d_v1_batch_neg = np.expand_dims(pts3d_v1_batch_neg, axis=3)
+    pts3d_v2_batch_neg = intrinsic @ pose @ np.linalg.inv(intrinsic) @ pts3d_v1_batch_neg
+    pts2d_v2_batch_neg = np.copy(pts3d_v2_batch_neg)
+    pts2d_v2_batch_neg[:, :, 0, 0] = pts2d_v2_batch_neg[:, :, 0, 0] / pts2d_v2_batch_neg[:, :, 2, 0]
+    pts2d_v2_batch_neg[:, :, 1, 0] = pts2d_v2_batch_neg[:, :, 1, 0] / pts2d_v2_batch_neg[:, :, 2, 0]
+    pts2d_v2_batch_neg = pts2d_v2_batch_neg[:, :, 0:2, 0]
+    minoc_dist = np.sqrt(np.sum((pts2d_v2_batch_neg - pts2d_v2_batch_pos) ** 2, axis=2, keepdims=True))
+
+    return occ_detect_c_numba(epp1.astype(np.float32), epp2.astype(np.float32), pts2dsrch_v1_batch.astype(np.float32), pts2d_v1_batch.astype(np.float32), pts2d_v2_batch.astype(np.float32), seach_distance.astype(np.float32), out_range_selecor, occ_selector, minsr_dist, minoc_dist * minoc_dist_ratio, w=w, h=h)
 
 
 if __name__ == '__main__':
@@ -282,24 +301,129 @@ if __name__ == '__main__':
         flowmap_diff = torch.sum(flowmap_diff.abs(), dim=1, keepdim=True)
 
         # Inference
-        occ_selectors = list()
-        ratio = np.linspace(0, 1, 5)
-        ratio = np.exp(ratio)
-
-        for r in ratio:
-            pose_np_c = np.copy(pose_np)
-            pose_np_c[0:3, 3] = r * pose_np_c[0:3, 3]
-            occ_selector = occ_detect_c(intrinsic=intrinsic_np, pose=pose_np_c, depthmap=depthmap_np, minoc_dist=3)
-            occ_selectors.append(np.array(tensor2disp(torch.from_numpy(occ_selector).unsqueeze(0).unsqueeze(0), vmax=1, viewind=0)))
-        occ_selectors = np.concatenate(occ_selectors, axis=0)
-        Image.fromarray(occ_selectors).save('/home/shengjie/Desktop/3.png')
-
+        occ_selector = occ_detect_c(intrinsic=intrinsic_np, pose=pose_np, depthmap=depthmap_np, minoc_dist_ratio=10)
 
         fig1 = tensor2rgb(data_blob['img1'].unsqueeze(0), viewind=0)
         fig2 = tensor2rgb(data_blob['img2'].unsqueeze(0), viewind=0)
-        fig3 = tensor2disp(torch.from_numpy(occ_selector1).unsqueeze(0).unsqueeze(0), vmax=1, viewind=0)
-        # fig4 = tensor2disp(torch.from_numpy(occ_selector2).unsqueeze(0).unsqueeze(0), vmax=1, viewind=0)
+        fig3 = tensor2disp(torch.from_numpy(occ_selector).unsqueeze(0).unsqueeze(0), vmax=1, viewind=0)
         fig5 = tensor2disp(flowmap_diff > 1, vmax=1, viewind=0)
-        # fig_combined = np.concatenate([np.array(fig1), np.array(fig2), np.array(fig3), np.array(fig4), np.array(fig5)], axis=0)
         fig_combined = np.concatenate([np.array(fig1), np.array(fig2), np.array(fig3), np.array(fig5)], axis=0)
-        Image.fromarray(fig_combined).save(os.path.join(vlsroot, "{}.png".format(tag)))
+        Image.fromarray(fig_combined).show()
+        # Image.fromarray(fig_combined).save(os.path.join(vlsroot, "{}.png".format(tag)))
+
+        cam_org_3d = np.array([[0, 0, 0, 1]]).T
+        epp1 = intrinsic_np @ np.linalg.inv(pose_np) @ cam_org_3d # Epipole on frame 1, projection of camera 2
+        epp1[0, 0] = epp1[0, 0] / epp1[2, 0]
+        epp1[1, 0] = epp1[1, 0] / epp1[2, 0]
+        epp2 = intrinsic_np @ pose_np @ cam_org_3d # Epipole on frame 2, projection of camera 1
+        epp2[0, 0] = epp2[0, 0] / epp2[2, 0]
+        epp2[1, 0] = epp2[1, 0] / epp2[2, 0]
+
+        # Check the correctness of the Epp Geometry
+        sm_num = 100
+        rndx = 970
+        rndy = 165
+        rndd = depthmap_np[rndy, rndx]
+        log_range = np.linspace(-10, 10, sm_num - 1)
+        log_range = np.concatenate([log_range, np.zeros([1])], axis=0)
+        log_range = np.sort(log_range)
+        rndd_expanded = np.exp(np.log(rndd) + log_range)
+        rnd_pts3d_v1 = np.stack([np.ones([sm_num]) * rndx * rndd_expanded, np.ones([sm_num]) * rndy * rndd_expanded, rndd_expanded, np.ones([sm_num])], axis=1).T
+        rnd_pts3d_v2 = intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ rnd_pts3d_v1
+        rnd_pts2d_v2 = np.copy(rnd_pts3d_v2)
+        rnd_pts2d_v2[0, :] = rnd_pts2d_v2[0, :] / rnd_pts2d_v2[2, :]
+        rnd_pts2d_v2[1, :] = rnd_pts2d_v2[1, :] / rnd_pts2d_v2[2, :]
+        selector_pos = rnd_pts2d_v2[2, :] > 0
+        rnd_pts2d_v2 = rnd_pts2d_v2[:, selector_pos]
+
+        # Check the correctness of the Scale Ambiguity
+        scale_np = np.sqrt(np.sum(pose_np[0:3, 3] ** 2))
+        scale_np_expand = np.exp(np.log(scale_np) + log_range)
+        pose_np_expand = np.repeat(np.expand_dims(pose_np, axis=0), sm_num, axis=0)
+        pose_np_expand[:, 0:3, 3] = pose_np_expand[:, 0:3, 3] / np.sqrt(np.sum(pose_np_expand[:, 0:3, 3] ** 2, axis=1, keepdims=True)) * np.expand_dims(scale_np_expand, axis=1)
+        rnd_pts3d_v1_s = np.stack([[rndx * rndd], [rndy * rndd], [rndd], [1]], axis=1).T
+        rnd_pts3d_v2_s = np.expand_dims(intrinsic_np, axis=0) @ pose_np_expand @ np.expand_dims(np.linalg.inv(intrinsic_np) @ rnd_pts3d_v1_s, axis=0)
+        rnd_pts3d_v2_s = np.squeeze(rnd_pts3d_v2_s).T
+        rnd_pts2d_v2_s = np.copy(rnd_pts3d_v2_s)
+        rnd_pts2d_v2_s[0, :] = rnd_pts2d_v2_s[0, :] / rnd_pts2d_v2_s[2, :]
+        rnd_pts2d_v2_s[1, :] = rnd_pts2d_v2_s[1, :] / rnd_pts2d_v2_s[2, :]
+        selector_pos_s = rnd_pts2d_v2_s[2, :] > 0
+        rnd_pts2d_v2_s = rnd_pts2d_v2_s[:, selector_pos_s]
+
+        # Compute the Pure Rotation Movement at frame T+1
+        pose_np_pr = np.copy(pose_np)
+        pose_np_pr[0:3, 3] = 0
+        rnd_pts3d_v1_pr = np.stack([[rndx * rndd], [rndy * rndd], [rndd], [1]], axis=1).T
+        rnd_pts3d_v2_pr = intrinsic_np @ pose_np_pr @ np.linalg.inv(intrinsic_np) @ rnd_pts3d_v1_pr
+        rnd_pts2d_v2_pr = np.copy(rnd_pts3d_v2_pr)
+        rnd_pts2d_v2_pr[0, 0] = rnd_pts2d_v2_pr[0, 0] / rnd_pts2d_v2_pr[2, 0]
+        rnd_pts2d_v2_pr[1, 0] = rnd_pts2d_v2_pr[1, 0] / rnd_pts2d_v2_pr[2, 0]
+
+        # Compute the Pure Rotation Movement at frame T
+        rnd_pts3d_v1_pr_bck = intrinsic_np @ np.linalg.inv(pose_np_pr) @ np.linalg.inv(intrinsic_np) @ intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ rnd_pts3d_v1_pr
+        rnd_pts2d_v1_pr_bck = np.copy(rnd_pts3d_v1_pr_bck)
+        rnd_pts2d_v1_pr_bck[0, 0] = rnd_pts2d_v1_pr_bck[0, 0] / rnd_pts2d_v1_pr_bck[2, 0]
+        rnd_pts2d_v1_pr_bck[1, 0] = rnd_pts2d_v1_pr_bck[1, 0] / rnd_pts2d_v1_pr_bck[2, 0]
+
+        # Debug
+        pts_search, pts_occ_rec_v1, pts_occ_rec_v2 = occ_detect_c_debug(intrinsic=intrinsic_np, pose=pose_np, depthmap=depthmap_np, sx=rndx, sy=rndy)
+        pts_occ_rec_v1 = np.stack(pts_occ_rec_v1, axis=0)
+        pts_occ_rec_v2 = np.stack(pts_occ_rec_v2, axis=0)
+
+        # Compute the pixel rectangle at different movement scale
+        sm_num = 100
+        rndx = 970
+        rndy = 165
+        rndd = depthmap_np[rndy, rndx]
+        log_range = np.linspace(-10, 10, sm_num - 1)
+        log_range = np.concatenate([log_range, np.zeros([1])], axis=0)
+        log_range = np.sort(log_range)
+        rndd_expanded = np.exp(np.log(rndd) + log_range)
+        eppl_param = np.array([-(epp1[1, 0] - rndy), epp1[0, 0] - rndx])
+        eppl_param = eppl_param / np.sqrt(np.sum(eppl_param ** 2))
+
+        pts3d_v1_pos = np.array([[(rndx + 0.5 * eppl_param[0]) * rndd, (rndy + 0.5 * eppl_param[1]) * rndd, rndd, 1]]).T
+        pts3d_v2_pos = intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ pts3d_v1_pos
+        pts2d_v2_pos = np.copy(pts3d_v2_pos)
+        pts2d_v2_pos[0, 0] = pts2d_v2_pos[0, 0] / pts2d_v2_pos[2, 0]
+        pts2d_v2_pos[1, 0] = pts2d_v2_pos[1, 0] / pts2d_v2_pos[2, 0]
+        pts3d_v1_neg = np.array([[(rndx - 0.5 * eppl_param[0]) * rndd, (rndy - 0.5 * eppl_param[1]) * rndd, rndd, 1]]).T
+        pts3d_v2_neg = intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ pts3d_v1_neg
+        pts2d_v2_neg = np.copy(pts3d_v2_neg)
+        pts2d_v2_neg[0, 0] = pts2d_v2_neg[0, 0] / pts2d_v2_neg[2, 0]
+        pts2d_v2_neg[1, 0] = pts2d_v2_neg[1, 0] / pts2d_v2_neg[2, 0]
+        r_dist = np.sqrt(np.sum((pts2d_v2_pos[0:2, 0] - pts2d_v2_neg[0:2, 0]) ** 2))
+
+        pts3dnpr_v2_pos = intrinsic_np @ np.linalg.inv(pose_np_pr) @ np.linalg.inv(intrinsic_np) @ intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ pts3d_v1_pos
+        pts2dnpr_v2_pos = np.copy(pts3dnpr_v2_pos)
+        pts2dnpr_v2_pos[0, 0] = pts2dnpr_v2_pos[0, 0] / pts2dnpr_v2_pos[2, 0]
+        pts2dnpr_v2_pos[1, 0] = pts2dnpr_v2_pos[1, 0] / pts2dnpr_v2_pos[2, 0]
+        pts3dnpr_v2_neg = intrinsic_np @ np.linalg.inv(pose_np_pr) @ np.linalg.inv(intrinsic_np) @ intrinsic_np @ pose_np @ np.linalg.inv(intrinsic_np) @ pts3d_v1_neg
+        pts2dnpr_v2_neg = np.copy(pts3dnpr_v2_neg)
+        pts2dnpr_v2_neg[0, 0] = pts2dnpr_v2_neg[0, 0] / pts2dnpr_v2_neg[2, 0]
+        pts2dnpr_v2_neg[1, 0] = pts2dnpr_v2_neg[1, 0] / pts2dnpr_v2_neg[2, 0]
+        print("width: %f" % (np.sqrt(np.sum((pts2dnpr_v2_neg[0:2, 0] - pts2dnpr_v2_pos[0:2, 0]) ** 2))))
+
+        # Draw Epipole on two images
+        zero_idx = np.argmin(np.abs(log_range[selector_pos]))
+        cm = plt.get_cmap('seismic')
+        vls_color = cm((log_range + 10) / 20)
+        vls_color = np.copy(vls_color[selector_pos, :])
+        vls_color_s = cm((log_range + 10) / 20)
+        vls_color_s = np.copy(vls_color_s[selector_pos_s, :])
+
+
+        fig, axs = plt.subplots(2, 1, figsize=(16, 9))
+        axs[0].scatter([epp1[0, 0]], [epp1[1, 0]], s=10, c='r')
+        axs[0].scatter([rndx], [rndy], s=10, c='g')
+        axs[0].scatter([pts2dnpr_v2_pos[0, 0]], [pts2dnpr_v2_pos[1, 0]], s=10, c='r')
+        axs[0].scatter([pts2dnpr_v2_neg[0, 0]], [pts2dnpr_v2_neg[1, 0]], s=10, c='r')
+        axs[0].scatter([rnd_pts2d_v1_pr_bck[0, 0]], [rnd_pts2d_v1_pr_bck[1, 0]], s=10, c='g')
+        axs[0].imshow(tensor2rgb(data_blob['img1'].unsqueeze(0), viewind=0))
+
+        axs[1].scatter([epp2[0, 0]], [epp2[1, 0]], s=10, c='r')
+        axs[1].scatter([rnd_pts2d_v2[0, zero_idx]], [rnd_pts2d_v2[1, zero_idx]], s=10, c='g')
+        axs[1].scatter([rnd_pts2d_v2_pr[0, 0]], [rnd_pts2d_v2_pr[1, 0]], s=10, c='c')
+        axs[1].scatter([pts2d_v2_pos[0, 0]], [pts2d_v2_pos[1, 0]], s=10, c='r')
+        axs[1].scatter([pts2d_v2_neg[0, 0]], [pts2d_v2_neg[1, 0]], s=10, c='r')
+        axs[1].imshow(tensor2rgb(data_blob['img2'].unsqueeze(0), viewind=0))
