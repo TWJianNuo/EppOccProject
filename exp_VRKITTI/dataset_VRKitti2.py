@@ -79,6 +79,7 @@ class VirtualKITTI2(data.Dataset):
         self.rgb1_paths = list()
         self.rgb2_paths = list()
         self.flow_paths = list()
+        self.backflow_paths = list()
         self.depth_paths = list()
         self.ins_paths = list()
 
@@ -107,12 +108,14 @@ class VirtualKITTI2(data.Dataset):
             rgb2path = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'frames', 'rgb', 'Camera_0', "rgb_{}.jpg".format(str(frmidx + 1).zfill(5)))
             depthpath = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'frames', 'depth', 'Camera_0', "depth_{}.png".format(str(frmidx).zfill(5)))
             flowpath = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'frames', 'forwardFlow', 'Camera_0', "flow_{}.png".format(str(frmidx).zfill(5)))
+            backflowpath = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'frames', 'backwardFlow', 'Camera_0', "backwardFlow_{}.png".format(str(frmidx).zfill(5)))
             insmappath = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'frames', 'instanceSegmentation', 'Camera_0', "instancegt_{}.png".format(str(frmidx).zfill(5)))
 
             self.rgb1_paths.append(rgb1path)
             self.rgb2_paths.append(rgb2path)
             self.depth_paths.append(depthpath)
             self.flow_paths.append(flowpath)
+            self.backflow_paths.append(backflowpath)
             self.ins_paths.append(insmappath)
 
             extrinisic_path = os.path.join(self.root, "Scene{}".format(sceneidx.zfill(2)), envn, 'extrinsic.txt')
@@ -136,7 +139,7 @@ class VirtualKITTI2(data.Dataset):
         img_cropped = img[top:top+crph, left:left+crpw]
         return img_cropped
 
-    def aug_crop(self, img1, img2, flowmap, depthmap, instancemap, intrinsic):
+    def aug_crop(self, img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic):
         if img1.ndim == 3:
             h, w, _ = img1.shape
         else:
@@ -157,10 +160,11 @@ class VirtualKITTI2(data.Dataset):
         img1 = self.crop_img(img1, left=left, top=top, crph=crph, crpw=crpw)
         img2 = self.crop_img(img2, left=left, top=top, crph=crph, crpw=crpw)
         flowmap = self.crop_img(flowmap, left=left, top=top, crph=crph, crpw=crpw)
+        backflowmap = self.crop_img(backflowmap, left=left, top=top, crph=crph, crpw=crpw)
         depthmap = self.crop_img(depthmap, left=left, top=top, crph=crph, crpw=crpw)
         instancemap = self.crop_img(instancemap, left=left, top=top, crph=crph, crpw=crpw)
 
-        return img1, img2, flowmap, depthmap, instancemap, intrinsic
+        return img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic
 
     def colorjitter(self, img1, img2):
         if np.random.rand() < self.asymmetric_color_aug_prob:
@@ -176,8 +180,8 @@ class VirtualKITTI2(data.Dataset):
     def __getitem__(self, index):
         while True:
             try:
-                img1, img2, flowmap, depthmap, instancemap, intrinsic = self.read_imgpair_flow_depth_instance_intrinsic(index)
-                img1, img2, flowmap, depthmap, instancemap, intrinsic = self.aug_crop(img1, img2, flowmap, depthmap, instancemap, intrinsic)
+                img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic = self.read_imgpair_flow_depth_instance_intrinsic(index)
+                img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic = self.aug_crop(img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic)
                 break
             except:
                 index = index + 1
@@ -201,16 +205,17 @@ class VirtualKITTI2(data.Dataset):
         # self.validate_rename(img1, img2, depthmap, renamed_ins, intrinsic, renamed_poses, flowmap)
 
         tag = self.get_tag(index)
-        data_blob = self.wrapup(img1, img2, flowmap, depthmap, intrinsic, intrinsic_resize, renamed_ins, renamed_ins_featuresize, renamed_poses, renamed_ang, renamed_scale, tag)
+        data_blob = self.wrapup(img1, img2, flowmap, backflowmap, depthmap, intrinsic, intrinsic_resize, renamed_ins, renamed_ins_featuresize, renamed_poses, renamed_ang, renamed_scale, tag)
         return data_blob
 
     def __len__(self):
         return len(self.entries)
 
-    def wrapup(self, img1, img2, flowmap, depthmap, intrinsic, intrinsic_resize, renamed_ins, renamed_ins_featuresize, renamed_poses, renamed_ang, renamed_scale, tag):
+    def wrapup(self, img1, img2, flowmap, backflowmap, depthmap, intrinsic, intrinsic_resize, renamed_ins, renamed_ins_featuresize, renamed_poses, renamed_ang, renamed_scale, tag):
         img1 = torch.from_numpy(img1).permute([2, 0, 1]).float()
         img2 = torch.from_numpy(img2).permute([2, 0, 1]).float()
         flowmap = torch.from_numpy(flowmap).permute([2, 0, 1]).float()
+        backflowmap = torch.from_numpy(backflowmap).permute([2, 0, 1]).float()
         depthmap = torch.from_numpy(depthmap).unsqueeze(0).float()
         intrinsic = torch.from_numpy(intrinsic).float()
         intrinsic_resize = torch.from_numpy(intrinsic_resize).float()
@@ -227,6 +232,7 @@ class VirtualKITTI2(data.Dataset):
         data_blob['img1'] = img1
         data_blob['img2'] = img2
         data_blob['flowmap'] = flowmap
+        data_blob['backflowmap'] = backflowmap
         data_blob['depthmap'] = depthmap
         data_blob['intrinsic'] = intrinsic
         data_blob['intrinsic_resize'] = intrinsic_resize
@@ -576,6 +582,7 @@ class VirtualKITTI2(data.Dataset):
         img2 = np.array(read_gen(self.rgb2_paths[index])).astype(np.uint8)
 
         flowmap = np.array(readFlowVRKitti(self.flow_paths[index])).astype(np.float32)
+        backflowmap = np.array(readFlowVRKitti(self.backflow_paths[index])).astype(np.float32)
 
         depthmap = np.array(cv2.imread(self.depth_paths[index], cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)).astype(np.float32)
         depthmap = depthmap / 100
@@ -591,7 +598,7 @@ class VirtualKITTI2(data.Dataset):
         intrinsic_key = "{}_frm{}_cam{}".format(scene_name, str(frmidx).zfill(5), camidx)
         intrinsic = copy.deepcopy(self.intrinsic_dict[intrinsic_key])
 
-        return img1, img2, flowmap, depthmap, instancemap, intrinsic
+        return img1, img2, flowmap, backflowmap, depthmap, instancemap, intrinsic
 
 if __name__ == '__main__':
     import argparse
