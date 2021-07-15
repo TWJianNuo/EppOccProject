@@ -218,7 +218,9 @@ class Trainer:
                 if "depthgt" in inputs:
                     self.compute_depth_losses(inputs, outputs, losses)
 
-                self.log("train", inputs, outputs, losses)
+                self.log("train", inputs, outputs, losses, dovls=True)
+            else:
+                self.log("train", inputs, outputs, losses, dovls=False)
 
             if np.mod(self.step, 5000) == 0:
                 self.val()
@@ -402,29 +404,31 @@ class Trainer:
         print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + " | loss: {:.5f} | time elapsed: {} | time left: {}"
         print(print_string.format(self.epoch, batch_idx, samples_per_sec, loss, sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
 
-    def log(self, mode, inputs, outputs, losses):
+    def log(self, mode, inputs, outputs, losses, dovls=False):
         """Write an event to the tensorboard events file
         """
         writer = self.writers[mode]
         for l, v in losses.items():
             writer.add_scalar("{}".format(l), v, self.step)
+
         if mode == 'val':
             return
 
-        imgreconc = list()
-        for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
-            if k == 0:
-                imgreconc.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
-            else:
-                imgrecon = np.array(tensor2rgb(outputs['reconImgs', 0][k], viewind=0))
-                imgocc = outputs['occmaskrec'][k][0].squeeze().cpu().numpy()
-                imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
-                imgrecon = imgrecon.astype(np.uint8)
-                imgreconc.append(imgrecon)
-        imgreconc.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
-        imgreconc.append(np.array(tensor2disp(outputs['avecloss'], vmax=0.5, viewind=0)))
-        imgreconc = np.concatenate(imgreconc, axis=0)
-        writer.add_image('"img_recon"', (torch.from_numpy(imgreconc).float() / 255).permute([2, 0, 1]), self.step)
+        if dovls:
+            imgreconc = list()
+            for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
+                if k == 0:
+                    imgreconc.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
+                else:
+                    imgrecon = np.array(tensor2rgb(outputs['reconImgs', 0][k], viewind=0))
+                    imgocc = outputs['occmaskrec'][k][0].squeeze().cpu().numpy()
+                    imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
+                    imgrecon = imgrecon.astype(np.uint8)
+                    imgreconc.append(imgrecon)
+            imgreconc.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
+            imgreconc.append(np.array(tensor2disp(outputs['avecloss'], vmax=0.5, viewind=0)))
+            imgreconc = np.concatenate(imgreconc, axis=0)
+            writer.add_image('"img_recon"', (torch.from_numpy(imgreconc).float() / 255).permute([2, 0, 1]), self.step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
