@@ -32,8 +32,7 @@ cudnn.benchmark = True
 
 file_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # the directory that options.py resides in
 
-prj_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-exp_root = os.path.dirname(os.path.realpath(__file__))
+prj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 sys.path.insert(0, prj_root)
 sys.path.append('core')
 def compute_errors(gt, pred):
