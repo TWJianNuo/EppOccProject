@@ -9,21 +9,20 @@ import argparse
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 import pickle
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 from core.utils.flow_viz import flow_to_image
 from core.utils.utils import InputPadder, forward_interpolate, tensor2disp, tensor2rgb, vls_ins
-from core.utils import frame_utils
 from tqdm import tqdm
 import copy
 from glob import glob
 import random
 from core import self_occ_detector
 from scipy.stats.stats import pearsonr
+import torch.multiprocessing as mp
+import pickle
 
 def read_calib_file(path):
     """Read KITTI calibration file
@@ -140,32 +139,34 @@ def get_relpose(args, seq, index, ri):
         if ri < 0:
             relpose = np.linalg.inv(cpose) @ relpose
         else:
-            relpose = relpose @ cpose
+            # relpose = relpose @ cpose
+            relpose = cpose @ relpose
 
     return relpose
 
-def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=False):
-    idx_range = 5
-    rindices = list(range(-idx_range, idx_range + 1))
+def calc_err_curve_tmpre(processid, args, entries, dovls=False, debug_mode=False):
+    interval = np.floor(len(entries) / args.nprocs).astype(np.int).item()
+    if processid == args.nprocs - 1:
+        stidx = int(interval * processid)
+        edidx = len(entries)
+    else:
+        stidx = int(interval * processid)
+        edidx = int(interval * (processid + 1))
+    entries = entries[stidx:edidx]
+    if len(entries) == 0:
+        return
 
     num_trial = 100
-    nbins = 100
-    ebins = np.linspace(np.log(1), np.log(80), nbins)
-    ebins = np.exp(ebins)
+    idx_range = args.idx_range
+    rindices = list(range(-idx_range, idx_range + 1))
 
-    log_range = np.linspace(-maxdiff, maxdiff, num_trial - 1)
+    log_range = np.linspace(-args.maxdiff, args.maxdiff, num_trial - 1)
     log_range = list(log_range)
     log_range.append(0)
     log_range.sort()
     log_range = np.array(log_range)
     rat_range = np.exp(log_range)
     keyidx = np.argmin(np.abs(rat_range - 1))
-
-    corr_list_rec = dict()
-    depth_list_rec = dict()
-    for kk in range(1, idx_range + 1):
-        corr_list_rec[kk] = list()
-        depth_list_rec[kk] = list()
 
     sod = self_occ_detector.apply
 
@@ -180,6 +181,12 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
         pts2drec = dict()
         occmasks = dict()
 
+        corr_list_rec = dict()
+        depth_list_rec = dict()
+        for kk in range(1, idx_range + 1):
+            corr_list_rec[kk] = list()
+            depth_list_rec[kk] = list()
+
         skipf = False
         for ri in rindices:
             imgopath = os.path.join(args.dataset_root, seq, 'image_02', 'data', "{}.png".format(str(index + ri).zfill(10)))
@@ -190,6 +197,11 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
             continue
 
         imgcpath = os.path.join(args.dataset_root, seq, 'image_02', 'data', "{}.png".format(str(index).zfill(10)))
+        imgc = Image.open(imgcpath)
+        try:
+            imgc.verify()
+        except:
+            continue
         imgc = Image.open(imgcpath)
 
         mdGt_path = os.path.join(args.mdGt_root, seq, 'image_02', "{}.png".format(str(index).zfill(10)))
@@ -213,16 +225,24 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
         if np.sum(perm_selector) == 0:
             continue
 
+        imgo_integflag = True
         for ri in rindices:
             if ri == 0:
                 imgrec[ri] = imgc
                 imgreconmDrec[ri] = imgc
-                imgreconPermrec[ri] = np.repeat(np.expand_dims(np.array(imgc)[perm_selector, :].astype(np.float32), axis=0), axis=0, repeats=num_trial)
+                imgc_data = np.copy(np.array(imgc))
+                imgreconPermrec[ri] = np.repeat(np.expand_dims(imgc_data[perm_selector, :].astype(np.float32), axis=0), axis=0, repeats=num_trial)
                 pts2drec[ri] = np.stack([xx, yy], axis=2)
                 occmasks[ri] = np.ones([h, w], dtype=np.bool)
                 continue
 
             imgopath = os.path.join(args.dataset_root, seq, 'image_02', 'data', "{}.png".format(str(index + ri).zfill(10)))
+            try:
+                imgo = Image.open(imgopath)
+                imgo.verify()
+            except:
+                imgo_integflag = False
+                break
             imgo = Image.open(imgopath)
             imgrec[ri] = imgo
 
@@ -253,7 +273,8 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
             pts2d_v2_batch_t[:, :, 0] = (pts2d_v2_batch_t[:, :, 0] / (w - 1) - 0.5) * 2
             pts2d_v2_batch_t[:, :, 1] = (pts2d_v2_batch_t[:, :, 1] / (h - 1) - 0.5) * 2
             pts2d_v2_batch_t = pts2d_v2_batch_t.unsqueeze(0)
-            imgo_t = torch.from_numpy(np.array(imgo)).float().permute([2, 0, 1]).unsqueeze(0)
+            imgo_data = np.copy(np.array(imgo))
+            imgo_t = torch.from_numpy(imgo_data).float().permute([2, 0, 1]).unsqueeze(0)
             imgo_t_recon = F.grid_sample(imgo_t, pts2d_v2_batch_t, align_corners=False)
             imgo_t_recon = imgo_t_recon * (occmask == 0).float().cpu() * (torch.from_numpy(mdGt).unsqueeze(0).unsqueeze(0) > 0).float()
             imgo_t_reconf = Image.fromarray(imgo_t_recon.squeeze().permute([1, 2, 0]).numpy().astype(np.uint8))
@@ -296,6 +317,9 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
             imgo_t_recon_perm[:, perm_occ_selector, :] = -1
             imgreconPermrec[ri] = imgo_t_recon_perm
 
+        if not imgo_integflag:
+            continue
+
         # Compute the correlation for each one of them
         accum_abserr_rec = dict()
         accum_abserr_count_rec = dict()
@@ -326,6 +350,19 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
                         continue
                     corr_list_rec[kk].append(c)
                     depth_list_rec[kk].append(df[kkk])
+
+        svfold_corr = os.path.join(args.tmp_restorage, seq, "corr")
+        svfold_depth = os.path.join(args.tmp_restorage, seq, "depth")
+        os.makedirs(svfold_corr, exist_ok=True)
+        os.makedirs(svfold_depth, exist_ok=True)
+
+        svcorr_root = os.path.join(svfold_corr, "corr_{}_{}.pickle".format(seq.split('/')[1], str(index).zfill(10)))
+        with open(svcorr_root, 'wb') as handle:
+            pickle.dump(corr_list_rec, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        svdepth_root = os.path.join(svfold_depth, "depth_{}_{}.pickle".format(seq.split('/')[1], str(index).zfill(10)))
+        with open(svdepth_root, 'wb') as handle:
+            pickle.dump(depth_list_rec, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         if debug_mode:
             # Some necessary visualizatiron
@@ -404,13 +441,42 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
 
                 plt.savefig(os.path.join(vls_root_scatter, "{}_{}.png".format(seq.split('/')[1], str(index).zfill(10))), bbox_inches='tight', pad_inches=0, dpi=100)
                 plt.close()
+    return
+
+def draw_figure(args, entries):
+    nbins = 100
+    ebins = np.linspace(np.log(1), np.log(80), nbins)
+    ebins = np.exp(ebins)
+
+    corr_list_rect = dict()
+    depth_list_rect = dict()
+    for kk in range(1, args.idx_range + 1):
+        corr_list_rect[kk] = list()
+        depth_list_rect[kk] = list()
+
+    for entry in entries:
+        seq, index, _ = entry.split(' ')
+        svfold_corr = os.path.join(args.tmp_restorage, seq, "corr")
+        svfold_depth = os.path.join(args.tmp_restorage, seq, "depth")
+
+        svcorr_root = os.path.join(svfold_corr, "corr_{}_{}.pickle".format(seq.split('/')[1], str(index).zfill(10)))
+        svdepth_root = os.path.join(svfold_depth, "depth_{}_{}.pickle".format(seq.split('/')[1], str(index).zfill(10)))
+        if not os.path.exists(svcorr_root) or not os.path.exists(svcorr_root):
+            continue
+        corr_list_rec = pickle.load(open(svcorr_root, "rb"))
+        depth_list_rec = pickle.load(open(svdepth_root, "rb"))
+
+        for kk in range(1, args.idx_range + 1):
+            corr_list_rect[kk] += corr_list_rec[kk]
+            depth_list_rect[kk] += depth_list_rec[kk]
+
 
     plt.figure(figsize=(16, 9))
-    for kk in range(1, idx_range + 1):
+    for kk in range(1, args.idx_range + 1):
         sccx = list()
         sccy = list()
-        c_corrarr = np.array(corr_list_rec[kk])
-        c_deptharr = np.array(depth_list_rec[kk])
+        c_corrarr = np.array(corr_list_rect[kk])
+        c_deptharr = np.array(depth_list_rect[kk])
         indices = np.digitize(c_deptharr, ebins)
         for kkk in range(nbins):
             tmpselector = indices == kkk
@@ -422,16 +488,15 @@ def calc_err_curve_tmpre(args, entries, maxdiff=0.3, dovls=False, debug_mode=Fal
         plt.plot(sccx, sccy)
     plt.xlabel('Depth in Meters')
     plt.ylabel('Pearson Correlation Coefficient')
-    plt.title('Supervision Signal Quality of %d images with max log diff %f' % (len(entries), maxdiff))
+    plt.title('Supervision Signal Quality of %d images with max log diff %f' % (len(entries), args.maxdiff))
 
     legendtxt = list()
-    for kk in range(1, idx_range + 1):
+    for kk in range(1, args.idx_range + 1):
         legendtxt.append('{} frames'.format(kk * 2))
     plt.legend(legendtxt)
 
-    plt.savefig(os.path.join(args.vls_root_errcurve, "MaxLogDiff: %f.png" % maxdiff), bbox_inches='tight', pad_inches=0, dpi=100)
+    plt.savefig(os.path.join(args.vls_root_errcurve, "MaxLogDiff: %f.png" % args.maxdiff), bbox_inches='tight', pad_inches=0, dpi=100)
     plt.close()
-    return
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -446,10 +511,9 @@ if __name__ == '__main__':
     parser.add_argument('--vls_root_recon', type=str)
     parser.add_argument('--vls_root_errcurve', type=str)
     parser.add_argument('--tmp_restorage', type=str)
-    parser.add_argument('--num_workers', type=int, default=6)
-    parser.add_argument('--samplenum', type=int, default=50000)
-    parser.add_argument('--nprocs', type=int, default=6)
+    parser.add_argument('--nprocs', type=int, default=5)
     parser.add_argument('--maxdiff', type=float, default=0.3)
+    parser.add_argument('--idx_range', type=int, default=5)
     args = parser.parse_args()
 
     torch.manual_seed(2021)
@@ -464,11 +528,10 @@ if __name__ == '__main__':
     os.makedirs(args.vls_root_recon, exist_ok=True)
     os.makedirs(args.vls_root_errcurve, exist_ok=True)
 
-    num_frames = 100
+    num_frames = 1000
 
     entries = get_all_entries(args)
     random.shuffle(entries)
-    calc_err_curve_tmpre(args, entries[0:num_frames], maxdiff=args.maxdiff)
+    mp.spawn(calc_err_curve_tmpre, nprocs=args.nprocs, args=(args, entries[0:num_frames], False))
 
-    entries = get_all_entries(args)
-    mp.spawn(export_poses, nprocs=args.nprocs, args=(args, entries))
+    draw_figure(args, entries)

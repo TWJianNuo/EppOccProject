@@ -1,266 +1,36 @@
-from __future__ import print_function, division
-import os, sys
-project_rootdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-sys.path.insert(0, project_rootdir)
-sys.path.append('core')
+# Copyright Niantic 2019. Patent Pending. All rights reserved.
+#
+# This software is licensed under the terms of the Monodepth2 licence
+# which allows for non-commercial use only, the full terms of which are made
+# available in the LICENSE file.
 
-import argparse
-import os
-import cv2
-import time
+from __future__ import absolute_import, division, print_function
+
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.backends.backend_agg import FigureCanvasAgg
+import time
+import os
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-import time
-
+import torch.optim as optim
 from torch.utils.data import DataLoader
-from exp_KITTI_oraclepose.dataset_kitti_eigen import KITTI_eigen
-from exp_KITTI_oraclepose.eppnet.EppNet import EppNet
-
 from torch.utils.tensorboard import SummaryWriter
-import torch.utils.data as data
-from PIL import Image, ImageDraw
-from core.utils.flow_viz import flow_to_image
-from core.utils.utils import InputPadder, forward_interpolate, tensor2disp, tensor2rgb, vls_ins
-import torch.multiprocessing as mp
-import torch.distributed as dist
-from torch.autograd import Variable
+import PIL.Image as Image
 
-from tqdm import tqdm
+import json
+from exp_KITTI_oraclepose.layers import *
 
-# exclude extremly large displacements
-MAX_FLOW = 400
-SUM_FREQ = 100
-VAL_FREQ = 5000
+from exp_KITTI_oraclepose.dataset_kitti_eigen import KITTI_eigen
+import exp_KITTI_oraclepose.networks as networks
+from core.utils.utils import readlines, tensor2disp, tensor2rgb, tensor2grad, sec_to_hm_str
+import argparse
+from core import self_occ_detector
+import tqdm
 
-class SSIM(nn.Module):
-    """Layer to compute the SSIM loss between a pair of images
-    """
-    def __init__(self):
-        super(SSIM, self).__init__()
-        self.mu_x_pool   = nn.AvgPool2d(3, 1)
-        self.mu_y_pool   = nn.AvgPool2d(3, 1)
-        self.sig_x_pool  = nn.AvgPool2d(3, 1)
-        self.sig_y_pool  = nn.AvgPool2d(3, 1)
-        self.sig_xy_pool = nn.AvgPool2d(3, 1)
+import torch.backends.cudnn as cudnn
+cudnn.benchmark = True
 
-        self.refl = nn.ReflectionPad2d(1)
-
-        self.C1 = 0.01 ** 2
-        self.C2 = 0.03 ** 2
-
-    def forward(self, x, y):
-        x = self.refl(x)
-        y = self.refl(y)
-
-        mu_x = self.mu_x_pool(x)
-        mu_y = self.mu_y_pool(y)
-
-        sigma_x  = self.sig_x_pool(x ** 2) - mu_x ** 2
-        sigma_y  = self.sig_y_pool(y ** 2) - mu_y ** 2
-        sigma_xy = self.sig_xy_pool(x * y) - mu_x * mu_y
-
-        SSIM_n = (2 * mu_x * mu_y + self.C1) * (2 * sigma_xy + self.C2)
-        SSIM_d = (mu_x ** 2 + mu_y ** 2 + self.C1) * (sigma_x + sigma_y + self.C2)
-
-        return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-def fetch_optimizer(args, model, steps_per_epoch):
-    """ Create the optimizer and learning rate scheduler """
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wdecay, eps=args.epsilon)
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, args.lr, epochs=20, steps_per_epoch=steps_per_epoch, pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
-    return optimizer, scheduler
-
-class Logger:
-    def __init__(self, logpath):
-        self.logpath = logpath
-        self.writer = None
-
-    def create_summarywriter(self):
-        if self.writer is None:
-            self.writer = SummaryWriter(self.logpath)
-
-    def write_vls(self, data_blob, outputs, flowselector, step):
-        img1 = data_blob['img1'][0].permute([1, 2, 0]).numpy().astype(np.uint8)
-        img2 = data_blob['img2'][0].permute([1, 2, 0]).numpy().astype(np.uint8)
-        insmap = data_blob['insmap'][0].squeeze().numpy()
-
-        figmask_flow = tensor2disp(flowselector, vmax=1, viewind=0)
-        insvls = vls_ins(img1, insmap)
-
-        depthpredvls = tensor2disp(1 / outputs[('depth', 2)], vmax=0.15, viewind=0)
-        flowvls = tensor2disp(1 / data_blob['mdDepth_pred'], vmax=0.15, viewind=0)
-        # flowvls = flow_to_image(outputs[('flowpred', 2)][0].detach().cpu().permute([1, 2, 0]).numpy(), rad_max=10)
-        imgrecon = tensor2rgb(outputs[('reconImg', 2)], viewind=0)
-
-        img_val_up = np.concatenate([np.array(insvls), np.array(img2)], axis=1)
-        img_val_mid2 = np.concatenate([np.array(depthpredvls), np.array(figmask_flow)], axis=1)
-        img_val_mid3 = np.concatenate([np.array(imgrecon), np.array(flowvls)], axis=1)
-        img_val = np.concatenate([np.array(img_val_up), np.array(img_val_mid2), np.array(img_val_mid3)], axis=0)
-        self.writer.add_image('predvls', (torch.from_numpy(img_val).float() / 255).permute([2, 0, 1]), step)
-
-        X = self.vls_sampling(np.array(insvls), img2, data_blob['depthvls'], data_blob['flowgt_vls'], data_blob['insmap'], outputs)
-        self.writer.add_image('X', (torch.from_numpy(X).float() / 255).permute([2, 0, 1]), step)
-
-        X = self.vls_objmvment(np.array(insvls), data_blob['insmap'], data_blob['posepred'])
-        self.writer.add_image('objmvment', (torch.from_numpy(X).float() / 255).permute([2, 0, 1]), step)
-
-    def vls_sampling(self, img1, img2, depthgt, flowmap, insmap, outputs):
-        depthgtnp = depthgt[0].squeeze().cpu().numpy()
-        insmapnp = insmap[0].squeeze().cpu().numpy()
-        flowmapnp = flowmap[0].cpu().numpy()
-
-        h, w, _ = img1.shape
-        xx, yy = np.meshgrid(range(w), range(h), indexing='xy')
-        selector = (depthgtnp > 0)
-
-        flowx = outputs[('flowpred', 2)][0, 0].detach().cpu().numpy()
-        flowy = outputs[('flowpred', 2)][0, 1].detach().cpu().numpy()
-        flowxf = flowx[selector]
-        flowyf = flowy[selector]
-
-        xxf = xx[selector]
-        yyf = yy[selector]
-        df = depthgtnp[selector]
-
-        slRange_sel = (np.mod(xx, 4) == 0) * (np.mod(yy, 4) == 0) * selector * (insmapnp > 0)
-        dsratio = 4
-        if np.sum(slRange_sel) > 0:
-            xxfsl = xx[slRange_sel]
-            yyfsl = yy[slRange_sel]
-            rndidx = np.random.randint(0, xxfsl.shape[0], 1).item()
-
-            xxfsl_sel = xxfsl[rndidx]
-            yyfsl_sel = yyfsl[rndidx]
-
-            slvlsxx_fg = (outputs['sample_pts'][0, :, int(yyfsl_sel / dsratio), int(xxfsl_sel / dsratio), 0].detach().cpu().numpy() + 1) / 2 * w
-            slvlsyy_fg = (outputs['sample_pts'][0, :, int(yyfsl_sel / dsratio), int(xxfsl_sel / dsratio), 1].detach().cpu().numpy() + 1) / 2 * h
-        else:
-            slvlsxx_fg = None
-            slvlsyy_fg = None
-
-        slRange_sel = (np.mod(xx, 4) == 0) * (np.mod(yy, 4) == 0) * selector * (insmapnp == 0)
-        if np.sum(slRange_sel) > 0:
-            xxfsl = xx[slRange_sel]
-            yyfsl = yy[slRange_sel]
-            rndidx = np.random.randint(0, xxfsl.shape[0], 1).item()
-
-            xxfsl_sel = xxfsl[rndidx]
-            yyfsl_sel = yyfsl[rndidx]
-
-            slvlsxx_bg = (outputs['sample_pts'][0, :, int(yyfsl_sel / dsratio), int(xxfsl_sel / dsratio), 0].detach().cpu().numpy() + 1) / 2 * w
-            slvlsyy_bg = (outputs['sample_pts'][0, :, int(yyfsl_sel / dsratio), int(xxfsl_sel / dsratio), 1].detach().cpu().numpy() + 1) / 2 * h
-
-            gtposx = xxfsl_sel + flowmapnp[0, yyfsl_sel, xxfsl_sel]
-            gtposy = yyfsl_sel + flowmapnp[1, yyfsl_sel, xxfsl_sel]
-        else:
-            slvlsxx_bg = None
-            slvlsyy_bg = None
-
-        cm = plt.get_cmap('magma')
-        rndcolor = cm(1 / df / 0.15)[:, 0:3]
-
-        fig = plt.figure(figsize=(16, 9))
-        canvas = FigureCanvasAgg(fig)
-        fig.add_subplot(2, 2, 1)
-        plt.scatter(xxf, yyf, 3, rndcolor)
-        plt.imshow(img1)
-        plt.title("Input")
-
-        fig.add_subplot(2, 2, 2)
-        plt.scatter(xxf + flowxf, yyf + flowyf, 3, rndcolor)
-        plt.imshow(img2)
-        plt.title("Fixed Prediction")
-
-        fig.add_subplot(2, 2, 3)
-        if slvlsxx_fg is not None and slvlsyy_fg is not None:
-            plt.scatter(slvlsxx_fg, slvlsyy_fg, 3, 'b')
-        if slvlsxx_fg is not None and slvlsyy_fg is not None:
-            plt.scatter(slvlsxx_bg, slvlsyy_bg, 3, 'b')
-            plt.scatter(gtposx, gtposy, 3, 'r')
-        plt.imshow(img2)
-        plt.title("Sampling Arae")
-
-        fig.tight_layout()  # Or equivalently,  "plt.tight_layout()"
-        canvas.draw()
-        buf = canvas.buffer_rgba()
-        plt.close()
-        X = np.asarray(buf)
-        return X
-
-    def vls_objmvment(self, img1, insmap, posepred):
-        insmap_np = insmap[0].squeeze().cpu().numpy()
-        posepred_np = posepred[0].cpu().numpy()
-        xx, yy = np.meshgrid(range(insmap_np.shape[1]), range(insmap_np.shape[0]), indexing='xy')
-        fig, ax = plt.subplots(figsize=(16,9))
-        canvas = FigureCanvasAgg(fig)
-        ax.imshow(img1)
-        for k in np.unique(insmap_np):
-            if k == 0:
-                 continue
-            xxf = xx[insmap_np == k]
-            yyf = yy[insmap_np == k]
-
-            xmin = xxf.min()
-            xmax = xxf.max()
-            ymin = yyf.min()
-            ymax = yyf.max()
-
-            if (ymax - ymin) * (xmax - xmin) < 1000:
-                continue
-
-            rect = patches.Rectangle((xmin, ymax), xmax - xmin, ymin - ymax, linewidth=1, facecolor='none', edgecolor='r')
-            ax.add_patch(rect)
-
-            ins_relpose = posepred_np[k] @ np.linalg.inv(posepred_np[0])
-            mvdist = np.sqrt(np.sum(ins_relpose[0:3, 3:4] ** 2))
-            ax.text(xmin + 5, ymin + 10, '%.3f' % mvdist, fontsize=6, c='r', weight='bold')
-
-        plt.axis('off')
-        canvas.draw()
-        buf = canvas.buffer_rgba()
-        plt.close()
-        X = np.asarray(buf)
-        return X
-
-    def write_vls_eval(self, data_blob, outputs, tagname, step):
-        img1 = data_blob['img1'][0].permute([1, 2, 0]).numpy().astype(np.uint8)
-        img2 = data_blob['img2'][0].permute([1, 2, 0]).numpy().astype(np.uint8)
-        insmap = data_blob['insmap'][0].squeeze().numpy()
-
-        insvls = vls_ins(img1, insmap)
-
-        depthpredvls = tensor2disp(1 / outputs[('depth', 2)], vmax=0.15, viewind=0)
-        depthgtvls = tensor2disp(1 / data_blob['depthmap'], vmax=0.15, viewind=0)
-        flowvls = flow_to_image(outputs[('flowpred', 2)][0].detach().cpu().permute([1, 2, 0]).numpy(), rad_max=10)
-        imgrecon = tensor2rgb(outputs[('reconImg', 2)], viewind=0)
-
-        img_val_up = np.concatenate([np.array(insvls), np.array(img2)], axis=1)
-        img_val_mid2 = np.concatenate([np.array(depthpredvls), np.array(depthgtvls)], axis=1)
-        img_val_mid3 = np.concatenate([np.array(imgrecon), np.array(flowvls)], axis=1)
-        img_val = np.concatenate([np.array(img_val_up), np.array(img_val_mid2), np.array(img_val_mid3)], axis=0)
-        self.writer.add_image('{}_predvls'.format(tagname), (torch.from_numpy(img_val).float() / 255).permute([2, 0, 1]), step)
-
-        X = self.vls_sampling(np.array(insvls), img2, data_blob['depthvls'], data_blob['flowgt_vls'], data_blob['insmap'], outputs)
-        self.writer.add_image('{}_X'.format(tagname), (torch.from_numpy(X).float() / 255).permute([2, 0, 1]), step)
-
-    def write_dict(self, results, step):
-        for key in results:
-            self.writer.add_scalar(key, results[key], step)
-
-    def close(self):
-        self.writer.close()
+file_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # the directory that options.py resides in
 
 def compute_errors(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
@@ -286,337 +56,580 @@ def compute_errors(gt, pred):
 
     return [silog, abs_rel, log10, rms, sq_rel, log_rms, d1, d2, d3]
 
-@torch.no_grad()
-def validate_kitti(model, args, eval_loader, logger, group, total_steps, isorg=False):
-    """ Peform validation using the KITTI-2015 (train) split """
-    """ Peform validation using the KITTI-2015 (train) split """
-    model.eval()
-    gpu = args.gpu
-    eval_measures_depth = torch.zeros(10).cuda(device=gpu)
+class Trainer:
+    def __init__(self, options):
+        self.opt = options
+        self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
 
-    for val_id, data_blob in enumerate(tqdm(eval_loader)):
-        image1 = data_blob['img1'].cuda(gpu) / 255.0
-        image2 = data_blob['img2'].cuda(gpu) / 255.0
-        intrinsic = data_blob['intrinsic'].cuda(gpu)
-        insmap = data_blob['insmap'].cuda(gpu)
-        posepred = data_blob['posepred'].cuda(gpu)
-        depthgt = data_blob['depthmap'].cuda(gpu)
+        # checking height and width are multiples of 32
+        assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
+        assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
-        if not args.initbymD:
-            mD_pred = data_blob['depthpred'].cuda(gpu)
-        else:
-            mD_pred = data_blob['mdDepth_pred'].cuda(gpu)
-        mD_pred_clipped = torch.clamp_min(mD_pred, min=args.min_depth_pred)
+        self.models = {}
+        self.parameters_to_train = []
 
-        if not isorg:
-            outputs = model(image1, image2, mD_pred_clipped, intrinsic, posepred, insmap)
-            predread = outputs[('depth', 2)]
-        else:
-            predread = mD_pred
+        self.device = torch.device("cuda")
 
-        selector = ((depthgt > 0) * (predread > 0) * (mD_pred > 0)).float()
-        depth_gt_flatten = depthgt[selector == 1].cpu().numpy()
-        pred_depth_flatten = predread[selector == 1].cpu().numpy()
+        self.num_scales = len(self.opt.scales)
+        self.num_input_frames = len(self.opt.frame_ids)
+        self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
 
-        eval_measures_depth_np = compute_errors(gt=depth_gt_flatten, pred=pred_depth_flatten)
+        assert self.opt.frame_ids[0] == 0, "frame_ids must start with 0"
 
-        eval_measures_depth[:9] += torch.tensor(eval_measures_depth_np).cuda(device=gpu)
-        eval_measures_depth[9] += 1
+        self.use_pose_net = not (self.opt.use_stereo and self.opt.frame_ids == [0])
+        self.use_pose_net = False
 
-        if not(logger is None) and np.mod(val_id, 20) == 0 and not isorg:
-            seq, frmidx = data_blob['tag'][0].split(' ')
-            tag = "{}_{}".format(seq.split('/')[-1], frmidx)
-            logger.write_vls_eval(data_blob, outputs, tag, total_steps)
+        if self.opt.use_stereo:
+            self.opt.frame_ids.append("s")
 
-    if args.distributed:
-        dist.all_reduce(tensor=eval_measures_depth, op=dist.ReduceOp.SUM, group=group)
+        self.models["encoder"] = networks.ResnetEncoder(
+            self.opt.num_layers, self.opt.weights_init == "pretrained")
+        self.models["encoder"].to(self.device)
+        self.parameters_to_train += list(self.models["encoder"].parameters())
 
-    if args.gpu == 0:
-        eval_measures_depth[0:9] = eval_measures_depth[0:9] / eval_measures_depth[9]
-        eval_measures_depth = eval_measures_depth.cpu().numpy()
-        print('Computing Depth errors for %f eval samples' % (eval_measures_depth[9].item()))
+        self.models["depth"] = networks.DepthDecoder(
+            self.models["encoder"].num_ch_enc, self.opt.scales)
+        self.models["depth"].to(self.device)
+        self.parameters_to_train += list(self.models["depth"].parameters())
+
+        if self.use_pose_net:
+            if self.opt.pose_model_type == "separate_resnet":
+                self.models["pose_encoder"] = networks.ResnetEncoder(
+                    self.opt.num_layers,
+                    self.opt.weights_init == "pretrained",
+                    num_input_images=self.num_pose_frames)
+
+                self.models["pose_encoder"].to(self.device)
+                self.parameters_to_train += list(self.models["pose_encoder"].parameters())
+
+                self.models["pose"] = networks.PoseDecoder(
+                    self.models["pose_encoder"].num_ch_enc,
+                    num_input_features=1,
+                    num_frames_to_predict_for=2)
+
+            elif self.opt.pose_model_type == "shared":
+                self.models["pose"] = networks.PoseDecoder(
+                    self.models["encoder"].num_ch_enc, self.num_pose_frames)
+
+            elif self.opt.pose_model_type == "posecnn":
+                self.models["pose"] = networks.PoseCNN(
+                    self.num_input_frames if self.opt.pose_model_input == "all" else 2)
+
+            self.models["pose"].to(self.device)
+            self.parameters_to_train += list(self.models["pose"].parameters())
+
+        self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+        self.model_lr_scheduler = optim.lr_scheduler.StepLR(
+            self.model_optimizer, self.opt.scheduler_step_size, 0.1)
+
+        if self.opt.load_weights_folder is not None:
+            self.load_model()
+
+        print("Training model named:\n  ", self.opt.model_name)
+        print("Models and tensorboard events files are saved to:\n  ", self.opt.log_dir)
+        print("Training is using:\n  ", self.device)
+
+        fpath = os.path.join(file_dir, 'exp_KITTI_oraclepose', "splits", self.opt.split, "{}_files.txt")
+
+        train_filenames = readlines(fpath.format("train"))
+        val_filenames = readlines(fpath.format("test"))
+
+        train_filenames = train_filenames
+        val_filenames = val_filenames
+
+        num_train_samples = len(train_filenames)
+        self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
+
+        train_dataset = KITTI_eigen(entries=train_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
+                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=True, muteaug=False, isgarg=True)
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+        val_dataset = KITTI_eigen(entries=val_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
+                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=320, inwidth=1216, inDualDirFrames=0, istrain=False, muteaug=True, isgarg=True)
+        self.val_loader = DataLoader(val_dataset, 1, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=False)
+
+        self.writers = {}
+        for mode in ["train", "val"]:
+            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
+
+        self.ssim = SSIM()
+        self.ssim.to(self.device)
+
+        self.reconimg = ReconImages()
+        self.sod = self_occ_detector.apply
+
+        self.depth_metric_names = [
+            "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
+
+        print("Using split:\n  ", self.opt.split)
+        print("There are {:d} training items and {:d} validation items\n".format(
+            len(train_dataset), len(val_dataset)))
+
+        self.maxa1 = -1e10
+        self.save_opts()
+
+    def set_train(self):
+        """Convert all models to training mode
+        """
+        for m in self.models.values():
+            m.train()
+
+    def set_eval(self):
+        """Convert all models to testing/evaluation mode
+        """
+        for m in self.models.values():
+            m.eval()
+
+    def train(self):
+        """Run the entire training pipeline
+        """
+        self.epoch = 0
+        self.step = 0
+        self.start_time = time.time()
+        for self.epoch in range(self.opt.num_epochs):
+            self.run_epoch()
+            if (self.epoch + 1) % self.opt.save_frequency == 0:
+                self.save_model()
+
+    def run_epoch(self):
+        """Run a single epoch of training and validation
+        """
+        self.model_lr_scheduler.step()
+
+        print("Training")
+        self.set_train()
+
+        for batch_idx, inputs in enumerate(self.train_loader):
+
+            before_op_time = time.time()
+
+            outputs, losses = self.process_batch(inputs)
+
+            self.model_optimizer.zero_grad()
+            losses["total_loss"].backward()
+            self.model_optimizer.step()
+
+            duration = time.time() - before_op_time
+
+            if np.mod(self.step, 100) == 0:
+                self.log_time(batch_idx, duration, losses["total_loss"].cpu().data)
+
+                if "depthgt" in inputs:
+                    self.compute_depth_losses(inputs, outputs, losses)
+
+                self.log("train", inputs, outputs, losses)
+
+            if np.mod(self.step, 5000) == 0:
+                self.val()
+
+            self.step += 1
+
+    def process_batch(self, inputs):
+        """Pass a minibatch through the network and generate images and losses
+        """
+        for key, ipt in inputs.items():
+            if key == 'tag':
+                continue
+            elif key == 'imgr' or key == 'poser':
+                for k, kipt in inputs[key].items():
+                    inputs[key][k] = kipt.to(self.device)
+            else:
+                inputs[key] = ipt.to(self.device)
+
+        features = self.models["encoder"](inputs['inrgb_augmented'])
+        outputs = self.models["depth"](features)
+
+        outputs = self.generate_images_pred(inputs, outputs)
+        losses = self.compute_losses(inputs, outputs)
+
+        return outputs, losses
+
+    def val(self):
+        """Validate the model on a single minibatch
+        """
+        totcount = 0
+        eval_measures_depth_nps = list()
+        losses = dict()
+        self.set_eval()
+        for _, inputs in enumerate(tqdm.tqdm(self.val_loader)):
+            with torch.no_grad():
+                for key, ipt in inputs.items():
+                    if key == 'tag':
+                        continue
+                    elif key == 'imgr' or key == 'poser':
+                        for k, kipt in inputs[key].items():
+                            inputs[key][k] = kipt.to(self.device)
+                    else:
+                        inputs[key] = ipt.to(self.device)
+
+                features = self.models["encoder"](inputs['inrgb_augmented'])
+                outputs = self.models["depth"](features)
+
+                disp = outputs[("disp", 0)]
+                _, depth_pred = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+
+                depthgt = inputs['depthgt']
+                selector = (depthgt > 0).float()
+                depth_gt_flatten = depthgt[selector == 1].cpu().numpy()
+                pred_depth_flatten = depth_pred[selector == 1].cpu().numpy()
+
+                pred_depth_flatten *= np.mean(depth_gt_flatten) / np.mean(pred_depth_flatten)
+
+                eval_measures_depth_np = compute_errors(gt=depth_gt_flatten, pred=pred_depth_flatten)
+                eval_measures_depth_nps.append(eval_measures_depth_np)
+                totcount += 1
+
+        eval_measures_depth_nps = np.stack(eval_measures_depth_nps, axis=0)
+        eval_measures_depth_nps = np.sum(eval_measures_depth_nps, axis=0) / totcount
+
+        print('Computing Depth errors for %f eval samples' % (totcount))
         print("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}".format('silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3'))
         for i in range(8):
-            print('{:7.3f}, '.format(eval_measures_depth[i]), end='')
-        print('{:7.3f}'.format(eval_measures_depth[8]))
+            print('{:7.3f}, '.format(eval_measures_depth_nps[i]), end='')
+        print('{:7.3f}'.format(eval_measures_depth_nps[8]))
 
-        return {'silog': float(eval_measures_depth[0]),
-                'abs_rel': float(eval_measures_depth[1]),
-                'log10': float(eval_measures_depth[2]),
-                'rms': float(eval_measures_depth[3]),
-                'sq_rel': float(eval_measures_depth[4]),
-                'log_rms': float(eval_measures_depth[5]),
-                'd1': float(eval_measures_depth[6]),
-                'd2': float(eval_measures_depth[7]),
-                'd3': float(eval_measures_depth[8])
-                }
-    else:
-        return None
+        eval_measures_name = ['silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
+        for i in range(9):
+            losses[eval_measures_name[i]] = eval_measures_depth_nps[i]
 
-class silog_loss(nn.Module):
-    def __init__(self, variance_focus):
-        super(silog_loss, self).__init__()
-        self.variance_focus = variance_focus
+        if self.maxa1 < losses['d1']:
+            self.maxa1 = losses['d1']
+            self.best_measure = losses
+            self.save_model('besta1')
 
-    def forward(self, depth_est, depth_gt, mask):
-        d = torch.log(depth_est[mask]) - torch.log(depth_gt[mask])
-        return torch.sqrt((d ** 2).mean() - self.variance_focus * (d.mean() ** 2)) * 10.0
-
-def read_splits():
-    split_root = os.path.join(project_rootdir, 'exp_pose_mdepth_kitti_eigen/splits')
-    train_entries = [x.rstrip('\n') for x in open(os.path.join(split_root, 'train_files.txt'), 'r')]
-    evaluation_entries = [x.rstrip('\n') for x in open(os.path.join(split_root, 'test_files.txt'), 'r')]
-    return train_entries, evaluation_entries
-
-def get_reprojection_loss(img1, insmap, outputs, ssim):
-    reprojloss = 0
-    selector = ((outputs[('reconImg', 2)].sum(dim=1, keepdim=True) != 0) * (insmap > 0)).float()
-    for k in range(1, 3, 1):
-        ssimloss = ssim(outputs[('reconImg', k)], img1).mean(dim=1, keepdim=True)
-        l1_loss = torch.abs(outputs[('reconImg', k)] - img1).mean(dim=1, keepdim=True)
-        reprojectionloss = 0.85 * ssimloss + 0.15 * l1_loss
-        reprojloss += (reprojectionloss * selector).sum() / (selector.sum() + 1)
-    reprojloss = reprojloss / 2
-    return reprojloss, selector
-
-def get_depth_loss(depthgt, mD_pred, outputs, silog_criterion):
-    _, _, h, w = depthgt.shape
-    selector = (depthgt > 0) * (mD_pred > 0)
-    depthloss = 0
-    for k in range(1, 3, 1):
-        tmpselector = (selector * (outputs[('depth', k)] > 0)).float()
-        depthloss += silog_criterion.forward(outputs[('depth', k)], depthgt, selector.to(torch.bool))
-
-    depthloss = depthloss / 2
-    return depthloss, tmpselector
-
-def train(gpu, ngpus_per_node, args):
-    print("Using GPU %d for training" % gpu)
-    args.gpu = gpu
-
-    if args.distributed:
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=ngpus_per_node, rank=args.gpu)
-
-    model = EppNet(args=args)
-    if args.distributed:
-        torch.cuda.set_device(args.gpu)
-        args.batch_size = int(args.batch_size / ngpus_per_node)
-        model = nn.SyncBatchNorm.convert_sync_batchnorm(module=model)
-        model = model.to(f'cuda:{args.gpu}')
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True, output_device=args.gpu)
-    else:
-        model = torch.nn.DataParallel(model)
-        model.cuda()
-
-    logroot = os.path.join(args.logroot, args.name)
-    print("Parameter Count: %d, saving location: %s" % (count_parameters(model), logroot))
-
-    if args.restore_ckpt is not None:
-        print("=> loading checkpoint '{}'".format(args.restore_ckpt))
-        loc = 'cuda:{}'.format(args.gpu)
-        checkpoint = torch.load(args.restore_ckpt, map_location=loc)
-        model.load_state_dict(checkpoint, strict=False)
-
-    if not args.initbymD:
-        args.mdPred_root = None
-        print("Initialization with weak monocular estimation")
-    else:
-        print("Initialization with strong monocular estimation")
-
-    model.train()
-
-    train_entries, evaluation_entries = read_splits()
-
-    train_dataset = KITTI_eigen(root=args.dataset_root, inheight=args.inheight, inwidth=args.inwidth, entries=train_entries, maxinsnum=args.maxinsnum,
-                                depth_root=args.depth_root, depthvls_root=args.depthvlsgt_root, prediction_root=args.prediction_root, ins_root=args.ins_root, mdPred_root=args.mdPred_root,
-                                RANSACPose_root=args.RANSACPose_root, istrain=True, muteaug=False, banremovedup=False, isgarg=False, baninsmap=args.baninsmap)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset) if args.distributed else None
-    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, pin_memory=True, num_workers=int(args.num_workers / ngpus_per_node), drop_last=True, sampler=train_sampler)
-
-    eval_dataset = KITTI_eigen(root=args.dataset_root, inheight=args.evalheight, inwidth=args.evalwidth, entries=evaluation_entries, maxinsnum=args.maxinsnum,
-                               depth_root=args.depth_root, depthvls_root=args.depthvlsgt_root, prediction_root=args.prediction_root, ins_root=args.ins_root, mdPred_root=args.mdPred_root,
-                               RANSACPose_root=args.RANSACPose_root, istrain=False, isgarg=True, baninsmap=args.baninsmap)
-    eval_sampler = torch.utils.data.distributed.DistributedSampler(eval_dataset) if args.distributed else None
-    eval_loader = data.DataLoader(eval_dataset, batch_size=1, pin_memory=True, num_workers=3, drop_last=True, sampler=eval_sampler)
-
-    print("Training splits contain %d images while test splits contain %d images" % (train_dataset.__len__(), eval_dataset.__len__()))
-
-    if args.distributed:
-        group = dist.new_group([i for i in range(ngpus_per_node)])
-
-    optimizer, scheduler = fetch_optimizer(args, model, int(train_dataset.__len__() / 2))
-
-    total_steps = 0
-
-    if args.gpu == 0:
-        logger = Logger(logroot)
-        logger_evaluation = Logger(os.path.join(args.logroot, 'evaluation_eigen_background', args.name))
-        logger_evaluation_org = Logger(os.path.join(args.logroot, 'evaluation_eigen_background', "{}_org".format(args.name)))
-        logger.create_summarywriter()
-        logger_evaluation.create_summarywriter()
-        logger_evaluation_org.create_summarywriter()
-
-    VAL_FREQ = 5000
-    epoch = 0
-    maxa1 = 0
-
-    silog_criterion = silog_loss(variance_focus=args.variance_focus)
-
-    st = time.time()
-    should_keep_training = True
-    while should_keep_training:
-        train_sampler.set_epoch(epoch)
-        for i_batch, data_blob in enumerate(train_loader):
-            optimizer.zero_grad()
-
-            image1 = data_blob['img1'].cuda(gpu) / 255.0
-            image2 = data_blob['img2'].cuda(gpu) / 255.0
-            intrinsic = data_blob['intrinsic'].cuda(gpu)
-            insmap = data_blob['insmap'].cuda(gpu)
-            depthgt = data_blob['depthmap'].cuda(gpu)
-            posepred = data_blob['posepred'].cuda(gpu)
-            if not args.initbymD:
-                mD_pred = data_blob['depthpred'].cuda(gpu)
+        print('Best Performance:')
+        print("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}".format('silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3'))
+        for k, name in enumerate(eval_measures_name):
+            if k < 8:
+                print('{:7.3f}, '.format(self.best_measure[name]), end='')
             else:
-                mD_pred = data_blob['mdDepth_pred'].cuda(gpu)
+                print('{:7.3f}'.format(self.best_measure[name]))
 
-            mD_pred_clipped = torch.clamp_min(mD_pred, min=args.min_depth_pred)
+        self.log('val', None, None, losses)
+        self.set_train()
 
-            outputs = model(image1, image2, mD_pred_clipped, intrinsic, posepred, insmap)
-            depthloss, depthselector = get_depth_loss(depthgt=depthgt, mD_pred=mD_pred, outputs=outputs, silog_criterion=silog_criterion)
+    def generate_images_pred(self, inputs, outputs):
+        """Generate the warped (reprojected) color images for a minibatch.
+        Generated images are saved into the `outputs` dictionary.
+        """
+        for scale in self.opt.scales:
+            disp = outputs[("disp", scale)]
+            disp = F.interpolate(disp, [self.opt.height, self.opt.width], mode="bilinear", align_corners=False)
+            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+            outputs[("depth", scale)] = depth
 
-            metrics = dict()
-            metrics['depthloss'] = depthloss.item()
+        # Compute Reprojection loss
+        occmaskrec = dict()
+        for k in inputs['imgr'].keys():
+            if k == 0:
+                continue
+            occmaskrec[k] = (self.sod(inputs['intrinsic'], inputs['poser'][k], outputs[("depth", 0)], float(1e10)) == 0).float()
+        outputs['occmaskrec'] = occmaskrec
 
-            loss = depthloss
-            if torch.sum(torch.isnan(loss)) > 0:
-                print(data_blob['tag'])
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+        # Compute Reconstruction image
+        for scale in self.opt.scales:
+            outputs['reconImgs', scale] = self.reconimg(inputs['imgr'], outputs[("depth", scale)], inputs['intrinsic'], inputs['poser'])
 
-            optimizer.step()
-            scheduler.step()
+        return outputs
 
-            if args.gpu == 0:
-                logger.write_dict(metrics, step=total_steps)
-                if total_steps % SUM_FREQ == 0:
-                    dr = time.time() - st
-                    resths = (args.num_steps - total_steps) * dr / (total_steps + 1) / 60 / 60
-                    print("Step: %d, rest hour: %f, depthloss: %f" % (total_steps, resths, depthloss.item()))
-                    logger.write_vls(data_blob, outputs, depthselector, total_steps)
+    def compute_reprojection_loss(self, pred, target):
+        """Computes reprojection loss between a batch of predicted and target images
+        """
+        abs_diff = torch.abs(target - pred)
+        l1_loss = abs_diff.mean(1, True)
 
-            if total_steps % VAL_FREQ == 1:
-                if args.gpu == 0:
-                    results = validate_kitti(model.module, args, eval_loader, logger, group, total_steps, isorg=False)
-                else:
-                    results = validate_kitti(model.module, args, eval_loader, None, group, None, isorg=False)
+        ssim_loss = self.ssim(pred, target).mean(1, True)
+        reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
 
-                if args.gpu == 0:
-                    logger_evaluation.write_dict(results, total_steps)
-                    if maxa1 < results['d1']:
-                        maxa1 = results['d1']
-                        PATH = os.path.join(logroot, 'maxa1.pth')
-                        torch.save(model.state_dict(), PATH)
-                        print("model saved to %s" % PATH)
+        return reprojection_loss
 
-                if args.gpu == 0:
-                    results = validate_kitti(model.module, args, eval_loader, None, group, total_steps, isorg=True)
-                    logger_evaluation_org.write_dict(results, total_steps)
-                else:
-                    validate_kitti(model.module, args, eval_loader, None, group, None, isorg=True)
+    def compute_losses(self, inputs, outputs):
+        """Compute the reprojection and smoothness losses for a minibatch
+        """
+        losses = {}
+        total_loss = 0
 
-                model.train()
+        for scale in self.opt.scales:
+            closs = torch.zeros_like(outputs[('depth', 0)])
+            ccount = torch.zeros_like(outputs[('depth', 0)])
+            for k in inputs['imgr'].keys():
+                if k == 0:
+                    continue
+                closs += self.compute_reprojection_loss(pred=outputs['reconImgs', scale][k], target=inputs['imgr'][0]) * outputs['occmaskrec'][k]
+                ccount += outputs['occmaskrec'][k]
+            avecloss = closs / (ccount + 1e-5)
 
-            total_steps += 1
+            if scale == 0:
+                outputs['avecloss'] = avecloss
 
-            if total_steps > args.num_steps:
-                should_keep_training = False
-                break
-        epoch = epoch + 1
+            losses['closs', scale] = torch.sum(avecloss) / (torch.sum(avecloss > 0) + 1)
+            total_loss += losses['closs', scale]
 
-        if args.gpu == 0:
-            PATH = os.path.join(logroot, 'epoch_{}.pth'.format(str(epoch).zfill(2)))
-            print("Save model to %s" % PATH)
-            torch.save(model.state_dict(), PATH)
+        total_loss = total_loss / len(self.opt.scales)
+        losses['total_loss'] = total_loss
+        return losses
 
-    if args.gpu == 0:
-        logger.close()
-        PATH = os.path.join(logroot, 'final.pth')
-        torch.save(model.state_dict(), PATH)
+    def compute_depth_losses(self, inputs, outputs, losses):
+        """Compute depth metrics, to allow monitoring during training
 
-    return
+        This isn't particularly accurate as it averages over the entire batch,
+        so is only used to give an indication of validation performance
+        """
+        bz, _, h, w = inputs["depthgt"].shape
+        depth_pred = outputs[("depth", 0)].detach()
 
+        depth_gt = inputs["depthgt"]
+        mask = depth_gt > 0
 
-if __name__ == '__main__':
+        depth_gt = depth_gt[mask]
+        depth_pred = depth_pred[mask]
+        depth_pred *= torch.median(depth_gt) / torch.median(depth_pred)
+
+        depth_pred = torch.clamp(depth_pred, min=1e-3, max=80)
+
+        depth_errors = compute_depth_errors(depth_gt, depth_pred)
+
+        for i, metric in enumerate(self.depth_metric_names):
+            losses[metric] = np.array(depth_errors[i].cpu())
+
+    def log_time(self, batch_idx, duration, loss):
+        """Print a logging statement to the terminal
+        """
+        samples_per_sec = self.opt.batch_size / duration
+        time_sofar = time.time() - self.start_time
+        training_time_left = (self.num_total_steps / self.step - 1.0) * time_sofar if self.step > 0 else 0
+        print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + " | loss: {:.5f} | time elapsed: {} | time left: {}"
+        print(print_string.format(self.epoch, batch_idx, samples_per_sec, loss, sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
+
+    def log(self, mode, inputs, outputs, losses):
+        """Write an event to the tensorboard events file
+        """
+        writer = self.writers[mode]
+        for l, v in losses.items():
+            writer.add_scalar("{}".format(l), v, self.step)
+        if mode == 'val':
+            return
+
+        imgreconc = list()
+        for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
+            if k == 0:
+                imgreconc.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
+            else:
+                imgrecon = np.array(tensor2rgb(outputs['reconImgs', 0][k], viewind=0))
+                imgocc = outputs['occmaskrec'][k][0].squeeze().cpu().numpy()
+                imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
+                imgrecon = imgrecon.astype(np.uint8)
+                imgreconc.append(imgrecon)
+        imgreconc.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
+        imgreconc.append(np.array(tensor2disp(outputs['avecloss'], vmax=0.5, viewind=0)))
+        imgreconc = np.concatenate(imgreconc, axis=0)
+        writer.add_image('"img_recon"', (torch.from_numpy(imgreconc).float() / 255).permute([2, 0, 1]), self.step)
+
+    def save_opts(self):
+        """Save options to disk so we know what we ran this experiment with
+        """
+        models_dir = os.path.join(self.log_path, "models")
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
+        to_save = self.opt.__dict__.copy()
+
+        with open(os.path.join(models_dir, 'opt.json'), 'w') as f:
+            json.dump(to_save, f, indent=2)
+
+    def save_model(self, name=None):
+        """Save model weights to disk
+        """
+        if name is None:
+            save_folder = os.path.join(self.log_path, "models", "weights_{}".format(self.epoch))
+        else:
+            save_folder = os.path.join(self.log_path, "models", name)
+        if not os.path.exists(save_folder):
+            os.makedirs(save_folder)
+
+        for model_name, model in self.models.items():
+            save_path = os.path.join(save_folder, "{}.pth".format(model_name))
+            to_save = model.state_dict()
+            if model_name == 'encoder':
+                # save the sizes - these are needed at prediction time
+                to_save['height'] = self.opt.height
+                to_save['width'] = self.opt.width
+                to_save['use_stereo'] = self.opt.use_stereo
+            torch.save(to_save, save_path)
+
+        save_path = os.path.join(save_folder, "{}.pth".format("adam"))
+        torch.save(self.model_optimizer.state_dict(), save_path)
+        print("Model saved to %s" % save_folder)
+
+    def load_model(self):
+        """Load model(s) from disk
+        """
+        self.opt.load_weights_folder = os.path.expanduser(self.opt.load_weights_folder)
+
+        assert os.path.isdir(self.opt.load_weights_folder), \
+            "Cannot find folder {}".format(self.opt.load_weights_folder)
+        print("loading model from folder {}".format(self.opt.load_weights_folder))
+
+        for n in self.opt.models_to_load:
+            print("Loading {} weights...".format(n))
+            path = os.path.join(self.opt.load_weights_folder, "{}.pth".format(n))
+            model_dict = self.models[n].state_dict()
+            pretrained_dict = torch.load(path)
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            self.models[n].load_state_dict(model_dict)
+
+        # loading adam state
+        optimizer_load_path = os.path.join(self.opt.load_weights_folder, "adam.pth")
+        if os.path.isfile(optimizer_load_path):
+            print("Loading Adam weights")
+            optimizer_dict = torch.load(optimizer_load_path)
+            self.model_optimizer.load_state_dict(optimizer_dict)
+        else:
+            print("Cannot find Adam weights so Adam is randomly initialized")
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', default='raft', help="name your experiment")
-    parser.add_argument('--stage', help="determines which dataset to use for training")
-    parser.add_argument('--restore_ckpt', help="restore checkpoint")
 
-    parser.add_argument('--lr', type=float, default=0.00002)
-    parser.add_argument('--num_steps', type=int, default=100000)
-    parser.add_argument('--batch_size', type=int, default=6)
-    parser.add_argument('--image_size', type=int, nargs='+', default=[384, 512])
-    parser.add_argument('--inheight', type=int, default=320)
-    parser.add_argument('--inwidth', type=int, default=960)
+    # PATHS
+    parser.add_argument("--dataset_root",
+                             type=str)
+    parser.add_argument("--depthgt_root",
+                             type=str)
+    parser.add_argument("--RANSACPose_root",
+                             type=str)
+    parser.add_argument("--log_dir",
+                             type=str,
+                             help="log directory",
+                             default=os.path.join(os.path.expanduser("~"), "tmp"))
+
+    # TRAINING options
+    parser.add_argument("--inDualDirFrames",
+                             type=int
+                        )
+    parser.add_argument("--model_name",
+                             type=str,
+                             help="the name of the folder to save the model in",
+                             default="mdp")
+    parser.add_argument("--split",
+                             type=str,
+                             help="which training split to use",
+                             choices=["eigen_zhou", "eigen_full", "odom", "benchmark"],
+                             default="eigen_zhou")
+    parser.add_argument("--num_layers",
+                             type=int,
+                             help="number of resnet layers",
+                             default=18,
+                             choices=[18, 34, 50, 101, 152])
+    parser.add_argument("--height",
+                             type=int,
+                             help="input image height",
+                             default=320)
+    parser.add_argument("--width",
+                             type=int,
+                             help="input image width",
+                             default=1024)
     parser.add_argument('--evalheight', type=int, default=320)
     parser.add_argument('--evalwidth', type=int, default=1216)
-    parser.add_argument('--maxinsnum', type=int, default=50)
-    parser.add_argument('--min_depth_pred', type=float, default=1)
-    parser.add_argument('--max_depth_pred', type=float, default=85)
-    parser.add_argument('--min_depth_eval', type=float, default=1e-3)
-    parser.add_argument('--max_depth_eval', type=float, default=80)
-    parser.add_argument('--variance_focus', type=float,
-                        help='lambda in paper: [0, 1], higher value more focus on minimizing variance of error',
-                        default=0.85)
-    parser.add_argument('--maxlogscale', type=float, default=1.5)
-    parser.add_argument('--baninsmap', action='store_true')
+    parser.add_argument("--disparity_smoothness",
+                             type=float,
+                             help="disparity smoothness weight",
+                             default=1e-3)
+    parser.add_argument("--scales",
+                             nargs="+",
+                             type=int,
+                             help="scales used in the loss",
+                             default=[0, 1, 2, 3])
+    parser.add_argument("--min_depth",
+                             type=float,
+                             help="minimum depth",
+                             default=0.1)
+    parser.add_argument("--max_depth",
+                             type=float,
+                             help="maximum depth",
+                             default=100.0)
+    parser.add_argument("--use_stereo",
+                             help="if set, uses stereo pair for training",
+                             action="store_true")
+    parser.add_argument("--frame_ids",
+                             nargs="+",
+                             type=int,
+                             help="frames to load",
+                             default=[0, -1, 1])
 
-    parser.add_argument('--tscale_range', type=float, default=3)
-    parser.add_argument('--objtscale_range', type=float, default=10)
-    parser.add_argument('--angx_range', type=float, default=0.03)
-    parser.add_argument('--angy_range', type=float, default=0.06)
-    parser.add_argument('--angz_range', type=float, default=0.01)
-    parser.add_argument('--num_layers', type=int, default=50)
-    parser.add_argument('--num_deges', type=int, default=32)
+    # OPTIMIZATION options
+    parser.add_argument("--batch_size",
+                             type=int,
+                             help="batch size",
+                             default=12)
+    parser.add_argument("--learning_rate",
+                             type=float,
+                             help="learning rate",
+                             default=1e-4)
+    parser.add_argument("--num_epochs",
+                             type=int,
+                             help="number of epochs",
+                             default=25)
+    parser.add_argument("--scheduler_step_size",
+                             type=int,
+                             help="step size of the scheduler",
+                             default=15)
+    parser.add_argument("--save_frequency",
+                             type=int,
+                             default=1)
 
-    parser.add_argument('--wdecay', type=float, default=.00005)
-    parser.add_argument('--epsilon', type=float, default=1e-8)
-    parser.add_argument('--clip', type=float, default=1.0)
-    parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--add_noise', action='store_true')
-    parser.add_argument('--dataset_root', type=str)
-    parser.add_argument('--semantics_root', type=str)
-    parser.add_argument('--depth_root', type=str)
-    parser.add_argument('--depthvlsgt_root', type=str)
-    parser.add_argument('--prediction_root', type=str, default=None)
-    parser.add_argument('--mdPred_root', type=str)
-    parser.add_argument('--RANSACPose_root', type=str)
-    parser.add_argument('--ins_root', type=str)
-    parser.add_argument('--logroot', type=str)
-    parser.add_argument('--num_workers', type=int, default=12)
-    parser.add_argument('--initbymD', action='store_true')
 
-    parser.add_argument('--distributed', default=True, type=bool)
-    parser.add_argument('--dist_url', type=str, help='url used to set up distributed training', default='tcp://127.0.0.1:1235')
-    parser.add_argument('--dist_backend', type=str, help='distributed backend', default='nccl')
+    # ABLATION options
+    parser.add_argument("--avg_reprojection",
+                             help="if set, uses average reprojection loss",
+                             action="store_true")
+    parser.add_argument("--disable_automasking",
+                             help="if set, doesn't do auto-masking",
+                             action="store_true")
+    parser.add_argument("--weights_init",
+                             type=str,
+                             help="pretrained or scratch",
+                             default="pretrained",
+                             choices=["pretrained", "scratch"])
+    parser.add_argument("--pose_model_input",
+                             type=str,
+                             help="how many images the pose network gets",
+                             default="pairs",
+                             choices=["pairs", "all"])
+    parser.add_argument("--pose_model_type",
+                             type=str,
+                             help="normal or shared",
+                             default="separate_resnet",
+                             choices=["posecnn", "separate_resnet", "shared"])
+
+    # SYSTEM options
+    parser.add_argument("--num_workers",
+                             type=int,
+                             help="number of dataloader workers",
+                             default=12)
+
+    # LOADING options
+    parser.add_argument("--load_weights_folder",
+                             type=str,
+                             help="name of model to load")
+    parser.add_argument("--models_to_load",
+                             nargs="+",
+                             type=str,
+                             help="models to load",
+                             default=["encoder", "depth"])
+
+    # LOGGING options
+    parser.add_argument("--log_frequency",
+                             type=int,
+                             help="number of batches between each tensorboard log",
+                             default=250)
+
+    # EVALUATION options
+    parser.add_argument("--post_process",
+                             help="if set will perform the flipping post processing "
+                                  "from the original monodepth paper",
+                             action="store_true")
 
     args = parser.parse_args()
-    args.dist_url = args.dist_url.rstrip('1235') + str(np.random.randint(2000, 3000, 1).item())
+    args.log_dir = os.path.join(file_dir, args.log_dir)
 
-    torch.manual_seed(1234)
-    np.random.seed(1234)
-
-    if not os.path.isdir(os.path.join(args.logroot, args.name)):
-        os.makedirs(os.path.join(args.logroot, args.name), exist_ok=True)
-    os.makedirs(os.path.join(args.logroot, 'evaluation', args.name), exist_ok=True)
-
-    torch.cuda.empty_cache()
-
-    ngpus_per_node = torch.cuda.device_count()
-
-    if args.distributed:
-        args.world_size = ngpus_per_node
-        mp.spawn(train, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        train(args.gpu, ngpus_per_node, args)
+    trainer = Trainer(args)
+    trainer.train()
