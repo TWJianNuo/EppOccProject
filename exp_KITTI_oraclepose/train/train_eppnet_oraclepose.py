@@ -5,10 +5,14 @@
 # available in the LICENSE file.
 
 from __future__ import absolute_import, division, print_function
+import sys
+import os
+prj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+sys.path.insert(0, prj_root)
+sys.path.append('core')
 
 import numpy as np
 import time
-import os
 
 import torch
 import torch.nn.functional as F
@@ -18,23 +22,18 @@ from torch.utils.tensorboard import SummaryWriter
 import PIL.Image as Image
 
 import json
-from exp_KITTI_oraclepose.layers import *
 
+from exp_KITTI_oraclepose.layers import *
 from exp_KITTI_oraclepose.dataset_kitti_eigen import KITTI_eigen
 import exp_KITTI_oraclepose.networks as networks
 from core.utils.utils import readlines, tensor2disp, tensor2rgb, tensor2grad, sec_to_hm_str
 import argparse
 from core import self_occ_detector
 import tqdm
-import sys
 import torch.backends.cudnn as cudnn
 cudnn.benchmark = True
 
 file_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # the directory that options.py resides in
-
-prj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-sys.path.insert(0, prj_root)
-sys.path.append('core')
 def compute_errors(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
 
