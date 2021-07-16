@@ -178,7 +178,7 @@ class ReconImages(nn.Module):
             pts3d_v2x = (pts3d_v2x / (pts3d_v2z + 1e-5) / (w - 1) - 0.5) * 2
             pts3d_v2y = (pts3d_v2y / (pts3d_v2z + 1e-5) / (h - 1) - 0.5) * 2
             pts3d_v2_gridspl = torch.cat([pts3d_v2x, pts3d_v2y], dim=3).squeeze(-1)
-            imgrecon = F.grid_sample(imgr[k], pts3d_v2_gridspl, align_corners=False, padding_mode="border")
+            imgrecon = F.grid_sample(imgr[k], pts3d_v2_gridspl, align_corners=False)
             imgreconc[k] = imgrecon
         return imgreconc
 
