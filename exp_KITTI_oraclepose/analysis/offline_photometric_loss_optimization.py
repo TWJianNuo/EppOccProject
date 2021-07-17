@@ -20,6 +20,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import PIL.Image as Image
+import matplotlib.pyplot as plt
 
 import json
 
@@ -134,17 +135,21 @@ class Trainer:
         fpath = os.path.join(file_dir, 'exp_KITTI_oraclepose', "splits", self.opt.split, "{}_files.txt")
 
         train_filenames = readlines(fpath.format("train"))
+        import random
+        random.seed(0)
+        random.shuffle(train_filenames)
         val_filenames = readlines(fpath.format("test"))
 
         # train_filenames = train_filenames[0:20]
-        # val_filenames = val_filenames[0:20]
+        # train_filenames[0] = '2011_10_03/2011_10_03_drive_0034_sync 1441 r\n'
+        val_filenames = val_filenames[0:20]
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
         train_dataset = KITTI_eigen(entries=train_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
-                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=True, muteaug=False, isgarg=True)
-        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=False, muteaug=True, isgarg=True)
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
         val_dataset = KITTI_eigen(entries=val_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
                                     RANSACPose_root=self.opt.RANSACPose_root, inheight=320, inwidth=1216, inDualDirFrames=0, istrain=False, muteaug=True, isgarg=True)
         self.val_loader = DataLoader(val_dataset, 1, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=False)
@@ -187,10 +192,7 @@ class Trainer:
         self.epoch = 0
         self.step = 0
         self.start_time = time.time()
-        for self.epoch in range(self.opt.num_epochs):
-            self.run_epoch()
-            if (self.epoch + 1) % self.opt.save_frequency == 0:
-                self.save_model()
+        self.run_epoch()
 
     def run_epoch(self):
         """Run a single epoch of training and validation
@@ -200,32 +202,54 @@ class Trainer:
         print("Training")
         self.set_train()
 
+        vls_root = '/media/shengjie/disk1/visualization/EppOccProject/photometric_train_offline_exp'
+        vls_root = os.path.join(vls_root, str(self.opt.inDualDirFrames).zfill(2))
+        os.makedirs(vls_root, exist_ok=True)
+
+        opttime = 500
         for batch_idx, inputs in enumerate(self.train_loader):
+            seq, frmidx, _ = inputs['tag'][0].split(' ')
 
-            before_op_time = time.time()
+            self.load_model()
 
-            outputs, losses = self.process_batch(inputs)
+            lossrec = list()
+            for _, optk in enumerate(range(opttime)):
+                outputs, losses = self.process_batch(inputs)
+                self.model_optimizer.zero_grad()
+                losses["total_loss"].backward()
+                self.model_optimizer.step()
+                print("Loss: %f" % losses['total_loss'])
 
-            self.model_optimizer.zero_grad()
-            losses["total_loss"].backward()
-            self.model_optimizer.step()
+                if np.mod(optk, 50) == 0:
+                    imgreconc = list()
+                    for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
+                        if k == 0:
+                            imgreconc.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
+                        else:
+                            imgrecon = np.array(tensor2rgb(outputs['reconImgs', 0][k], viewind=0))
+                            imgocc = outputs['occmaskrec'][k][0].squeeze().cpu().numpy()
+                            imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
+                            imgrecon = imgrecon.astype(np.uint8)
+                            imgreconc.append(imgrecon)
+                    imgreconc.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
+                    imgreconc.append(np.array(tensor2disp(outputs['avecloss'], vmax=0.5, viewind=0)))
+                    imgreconc = np.concatenate(imgreconc, axis=0)
+                    Image.fromarray(imgreconc).save(os.path.join(vls_root, '{}_{}_{}.png'.format(seq.split('/')[1], str(frmidx).zfill(10), str(optk).zfill(3))))
+                lossrec.append(losses["total_loss"].item())
 
-            duration = time.time() - before_op_time
-
-            if np.mod(self.step, 100) == 0:
-                self.log_time(batch_idx, duration, losses["total_loss"].cpu().data)
-
-                if "depthgt" in inputs:
-                    self.compute_depth_losses(inputs, outputs, losses)
-
-                self.log("train", inputs, outputs, losses, dovls=True)
-            else:
-                self.log("train", inputs, outputs, losses, dovls=False)
-
-            if np.mod(self.step, 5000) == 0:
-                self.val()
-
+            depth_out = outputs['depth', 0][0].squeeze().cpu().detach().numpy()
+            depth_out = (depth_out * 256.0).astype(np.uint16)
+            Image.fromarray(depth_out).save(os.path.join(vls_root, '{}_{}_{}.png'.format(seq.split('/')[1], str(frmidx).zfill(10), 'depthpred')), box_inches='tight', pad_inches=0)
+            depth_out = inputs['depthgt'][0].squeeze().cpu().detach().numpy()
+            depth_out = (depth_out * 256.0).astype(np.uint16)
+            Image.fromarray(depth_out).save(os.path.join(vls_root, '{}_{}_{}.png'.format(seq.split('/')[1], str(frmidx).zfill(10), 'depthgt')), box_inches='tight', pad_inches=0)
+            plt.figure()
+            plt.plot(list(range(len(lossrec))), lossrec)
+            plt.savefig(os.path.join(vls_root, '{}_{}_{}.png'.format(seq.split('/')[1], str(frmidx).zfill(10), 'loss_curve')), box_inches='tight', pad_inches=0)
+            plt.close()
             self.step += 1
+
+        return
 
     def process_batch(self, inputs):
         """Pass a minibatch through the network and generate images and losses

@@ -31,6 +31,7 @@ import argparse
 from core import self_occ_detector
 import tqdm
 import torch.backends.cudnn as cudnn
+import matplotlib.pyplot as plt
 cudnn.benchmark = True
 
 file_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # the directory that options.py resides in
@@ -94,32 +95,6 @@ class Trainer:
         self.models["depth"].to(self.device)
         self.parameters_to_train += list(self.models["depth"].parameters())
 
-        if self.use_pose_net:
-            if self.opt.pose_model_type == "separate_resnet":
-                self.models["pose_encoder"] = networks.ResnetEncoder(
-                    self.opt.num_layers,
-                    self.opt.weights_init == "pretrained",
-                    num_input_images=self.num_pose_frames)
-
-                self.models["pose_encoder"].to(self.device)
-                self.parameters_to_train += list(self.models["pose_encoder"].parameters())
-
-                self.models["pose"] = networks.PoseDecoder(
-                    self.models["pose_encoder"].num_ch_enc,
-                    num_input_features=1,
-                    num_frames_to_predict_for=2)
-
-            elif self.opt.pose_model_type == "shared":
-                self.models["pose"] = networks.PoseDecoder(
-                    self.models["encoder"].num_ch_enc, self.num_pose_frames)
-
-            elif self.opt.pose_model_type == "posecnn":
-                self.models["pose"] = networks.PoseCNN(
-                    self.num_input_frames if self.opt.pose_model_input == "all" else 2)
-
-            self.models["pose"].to(self.device)
-            self.parameters_to_train += list(self.models["pose"].parameters())
-
         self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
         self.model_lr_scheduler = optim.lr_scheduler.StepLR(
             self.model_optimizer, self.opt.scheduler_step_size, 0.1)
@@ -136,38 +111,25 @@ class Trainer:
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("test"))
 
-        # train_filenames = train_filenames[0:20]
-        # val_filenames = val_filenames[0:20]
+        train_filenames = train_filenames[0:20]
+        train_filenames[0] = '2011_10_03/2011_10_03_drive_0034_sync 1441 r\n'
+        val_filenames = val_filenames[0:20]
 
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
         train_dataset = KITTI_eigen(entries=train_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
-                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=True, muteaug=False, isgarg=True)
-        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
+                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=False, muteaug=True, isgarg=True)
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
         val_dataset = KITTI_eigen(entries=val_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
                                     RANSACPose_root=self.opt.RANSACPose_root, inheight=320, inwidth=1216, inDualDirFrames=0, istrain=False, muteaug=True, isgarg=True)
         self.val_loader = DataLoader(val_dataset, 1, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=False)
-
-        self.writers = {}
-        for mode in ["train", "val"]:
-            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
 
         self.ssim = SSIM()
         self.ssim.to(self.device)
 
         self.reconimg = ReconImages()
         self.sod = self_occ_detector.apply
-
-        self.depth_metric_names = [
-            "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
-
-        print("Using split:\n  ", self.opt.split)
-        print("There are {:d} training items and {:d} validation items\n".format(
-            len(train_dataset), len(val_dataset)))
-
-        self.maxa1 = -1e10
-        self.save_opts()
 
     def set_train(self):
         """Convert all models to training mode
@@ -184,68 +146,182 @@ class Trainer:
     def train(self):
         """Run the entire training pipeline
         """
-        self.epoch = 0
-        self.step = 0
-        self.start_time = time.time()
-        for self.epoch in range(self.opt.num_epochs):
-            self.run_epoch()
-            if (self.epoch + 1) % self.opt.save_frequency == 0:
-                self.save_model()
+        self.run_epoch()
 
     def run_epoch(self):
         """Run a single epoch of training and validation
         """
-        self.model_lr_scheduler.step()
-
-        print("Training")
         self.set_train()
 
+        import copy
         for batch_idx, inputs in enumerate(self.train_loader):
 
-            before_op_time = time.time()
+            for key, ipt in inputs.items():
+                if key == 'tag':
+                    continue
+                elif key == 'imgr' or key == 'poser':
+                    for k, kipt in inputs[key].items():
+                        inputs[key][k] = kipt.to(self.device)
+                else:
+                    inputs[key] = ipt.to(self.device)
 
-            outputs, losses = self.process_batch(inputs)
+            seq, frmidx, _ = inputs['tag'][0].split(' ')
 
-            self.model_optimizer.zero_grad()
-            losses["total_loss"].backward()
-            self.model_optimizer.step()
+            with torch.no_grad():
+                features = self.models["encoder"](inputs['inrgb_augmented'])
+                outputs = self.models["depth"](features)
 
-            duration = time.time() - before_op_time
+            imgr = inputs['imgr']
+            intrinsic = inputs['intrinsic']
+            poser = inputs['poser']
 
-            if np.mod(self.step, 100) == 0:
-                self.log_time(batch_idx, duration, losses["total_loss"].cpu().data)
+            scale = 0
+            disp = outputs[("disp", scale)]
+            _, depth = disp_to_depth(disp, self.opt.min_depth, self.opt.max_depth)
+            outputs[("depth", scale)] = depth * 5.4
 
-                if "depthgt" in inputs:
-                    self.compute_depth_losses(inputs, outputs, losses)
+            # Compute Reprojection loss
+            occmaskrec = dict()
+            for k in inputs['imgr'].keys():
+                if k == 0:
+                    continue
+                occmaskrec[k] = (self.sod(inputs['intrinsic'], inputs['poser'][k], outputs[("depth", 0)], float(1e10)) == 0).float()
+            outputs['occmaskrec'] = occmaskrec
 
-                self.log("train", inputs, outputs, losses, dovls=True)
-            else:
-                self.log("train", inputs, outputs, losses, dovls=False)
+            bz, _, h, w = inputs['depthgt'].shape
 
-            if np.mod(self.step, 5000) == 0:
-                self.val()
+            key = "{}_{}".format(h, w)
+            compdict = dict()
+            if key not in compdict.keys():
+                xx, yy = np.meshgrid(range(w), range(h), indexing='xy')
+                xx = torch.from_numpy(xx).unsqueeze(0).float().cuda()
+                xx = nn.Parameter(xx, requires_grad=False)
+                yy = torch.from_numpy(yy).unsqueeze(0).float().cuda()
+                yy = nn.Parameter(yy, requires_grad=False)
 
-            self.step += 1
+                ones = nn.Parameter(torch.ones([1, h, w], dtype=torch.float32, device=torch.device("cuda")), requires_grad=False)
+                compdict[key] = torch.stack([xx, yy, ones], dim=3)
 
-    def process_batch(self, inputs):
-        """Pass a minibatch through the network and generate images and losses
-        """
-        for key, ipt in inputs.items():
-            if key == 'tag':
-                continue
-            elif key == 'imgr' or key == 'poser':
-                for k, kipt in inputs[key].items():
-                    inputs[key][k] = kipt.to(self.device)
-            else:
-                inputs[key] = ipt.to(self.device)
+            depthmap = copy.deepcopy(outputs[("depth", scale)])
+            xx, yy, ones = torch.split(compdict[key], [1, 1, 1], dim=3)
+            xx = xx.expand([bz, -1, -1, -1])
+            yy = yy.expand([bz, -1, -1, -1])
+            ones = ones.expand([bz, -1, -1, -1])
+            depthmap = depthmap.squeeze(1).unsqueeze(-1)
 
-        features = self.models["encoder"](inputs['inrgb_augmented'])
-        outputs = self.models["depth"](features)
+            pts3d_v1 = torch.cat([xx * depthmap, yy * depthmap, depthmap, ones], dim=3).unsqueeze(-1)
 
-        outputs = self.generate_images_pred(inputs, outputs)
-        losses = self.compute_losses(inputs, outputs)
+            imgreconc = dict()
+            for k in imgr.keys():
+                if k == 0:
+                    continue
+                pM = intrinsic @ poser[k] @ torch.inverse(intrinsic)
+                pM = pM.unsqueeze(1).unsqueeze(1).expand([bz, h, w, -1, -1])
+                pts3d_v2 = pM @ pts3d_v1
+                pts3d_v2x, pts3d_v2y, pts3d_v2z, _ = torch.split(pts3d_v2, [1, 1, 1, 1], dim=3)
+                pts3d_v2x = (pts3d_v2x / (pts3d_v2z + 1e-5) / (w - 1) - 0.5) * 2
+                pts3d_v2y = (pts3d_v2y / (pts3d_v2z + 1e-5) / (h - 1) - 0.5) * 2
+                pts3d_v2_gridspl = torch.cat([pts3d_v2x, pts3d_v2y], dim=3).squeeze(-1)
+                imgrecon = F.grid_sample(imgr[k], pts3d_v2_gridspl, align_corners=False)
+                imgreconc[k] = imgrecon
 
-        return outputs, losses
+            imgvls = list()
+            for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
+                if k == 0:
+                    imgvls.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
+                else:
+                    imgrecon = np.array(tensor2rgb(imgreconc[k], viewind=0))
+                    imgocc = occmaskrec[k][0].squeeze().cpu().numpy()
+                    imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
+                    imgrecon = imgrecon.astype(np.uint8)
+                    imgvls.append(imgrecon)
+            imgvls.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
+            imgvls = np.concatenate(imgvls, axis=0)
+            Image.fromarray(imgvls).show()
+
+            depth_errors = compute_depth_errors(inputs['depthgt'][inputs['depthgt'] > 0], outputs[('depth', 0)][inputs['depthgt'] > 0])
+
+            # Validate the pose by projectiong according to the groundtruth depth
+            depthgt_np = inputs['depthgt'].cpu().numpy().squeeze()
+            xxnp, yynp = np.meshgrid(range(w), range(h), indexing='xy')
+            valid_selector = depthgt_np > 0
+            xxnpf = xxnp[valid_selector]
+            yynpf = yynp[valid_selector]
+            onesf = np.ones_like(xxnpf)
+            df = depthgt_np[valid_selector]
+            pts3dnp1 = np.stack([xxnpf * df, yynpf * df, df, onesf], axis=0)
+
+            cm = plt.get_cmap('magma')
+            tnp = cm(1 / df / 0.15)
+            vls_svpath = '/media/shengjie/disk1/visualization/EppOccProject/photometric_fregression_exp'
+            for rk in inputs['imgr'].keys():
+                if rk == 0:
+                    continue
+                else:
+                    pMnp = (intrinsic @ poser[rk] @ torch.inverse(intrinsic)).squeeze().cpu().numpy()
+                    pts3dnp2 = pMnp @ pts3dnp1
+                    pts3dnp2[0, :] = pts3dnp2[0, :] / pts3dnp2[2, :]
+                    pts3dnp2[1, :] = pts3dnp2[1, :] / pts3dnp2[2, :]
+
+                    fig, axs = plt.subplots(2, 1, figsize=(16, 9))
+                    axs[0].scatter(pts3dnp2[0, :], pts3dnp2[1, :], 0.5, tnp)
+                    axs[0].imshow(tensor2rgb(inputs['imgr'][rk]))
+                    axs[1].imshow(tensor2rgb(inputs['imgr'][0]))
+                    axs[1].scatter(xxnpf, yynpf, 0.5, tnp)
+                    plt.savefig(os.path.join(vls_svpath, '{}_{}_{}.png'.format(seq.split('/')[1], frmidx.zfill(10), str(rk))), bbox_inches='tight', pad_inches=0)
+                    plt.close()
+
+            # Validate the by projectiong according to the predicted pose
+            depthpred_np = depthmap.cpu().numpy().squeeze()
+            valid_selector = depthgt_np > 0
+            df = depthpred_np[valid_selector]
+            pts3dnp1 = np.stack([xxnpf * df, yynpf * df, df, onesf], axis=0)
+
+            for rk in inputs['imgr'].keys():
+                if rk == 0:
+                    continue
+                else:
+                    pMnp = (intrinsic @ poser[rk] @ torch.inverse(intrinsic)).squeeze().cpu().numpy()
+                    pts3dnp2 = pMnp @ pts3dnp1
+                    pts3dnp2[0, :] = pts3dnp2[0, :] / pts3dnp2[2, :]
+                    pts3dnp2[1, :] = pts3dnp2[1, :] / pts3dnp2[2, :]
+
+                    fig, axs = plt.subplots(2, 1, figsize=(16, 9))
+                    axs[0].scatter(pts3dnp2[0, :], pts3dnp2[1, :], 0.5, tnp)
+                    axs[0].imshow(tensor2rgb(inputs['imgr'][rk]))
+                    axs[1].imshow(tensor2rgb(inputs['imgr'][0]))
+                    axs[1].scatter(xxnpf, yynpf, 0.5, tnp)
+                    plt.savefig(os.path.join(vls_svpath, '{}_{}_{}_{}.png'.format(seq.split('/')[1], frmidx.zfill(10),'pred', str(rk))), bbox_inches='tight', pad_inches=0)
+                    plt.close()
+
+            # Validate Image Reconstruction Correctness
+            for rk in inputs['imgr'].keys():
+                if rk == 0:
+                    continue
+                else:
+                    pMnp = (intrinsic @ poser[rk] @ torch.inverse(intrinsic)).squeeze().cpu().numpy()
+                    pts3dnp2 = pMnp @ pts3dnp1
+                    pts3dnp2[0, :] = pts3dnp2[0, :] / pts3dnp2[2, :]
+                    pts3dnp2[1, :] = pts3dnp2[1, :] / pts3dnp2[2, :]
+
+                    xxtorchrs = torch.from_numpy(pts3dnp2[0, :]).float().unsqueeze(0).unsqueeze(0).cuda()
+                    xxtorchrs = (xxtorchrs / (w - 1) - 0.5) * 2
+                    yytorchrs = torch.from_numpy(pts3dnp2[1, :]).float().unsqueeze(0).unsqueeze(0).cuda()
+                    yytorchrs = (yytorchrs / (h - 1) - 0.5) * 2
+                    ptstorchrs = torch.stack([xxtorchrs, yytorchrs], dim=3)
+                    imgck = F.grid_sample(imgr[rk], ptstorchrs, align_corners=False)
+                    imgck = imgck.squeeze()
+                    imgcrsval = imgreconc[rk].squeeze()[:, yynpf, xxnpf]
+                    diff = torch.sum(torch.abs(imgck - imgcrsval), dim=0, keepdim=False)
+
+                    fig, axs = plt.subplots(2, 1, figsize=(16, 9))
+                    axs[0].scatter(pts3dnp2[0, :], pts3dnp2[1, :], 0.5, tnp)
+                    axs[0].imshow(tensor2rgb(inputs['imgr'][rk]))
+                    axs[1].imshow(tensor2rgb(inputs['imgr'][0]))
+                    axs[1].scatter(xxnpf, yynpf, 0.5, tnp)
+                    plt.savefig(os.path.join(vls_svpath, '{}_{}_{}_{}.png'.format(seq.split('/')[1], frmidx.zfill(10),'pred', str(rk))), bbox_inches='tight', pad_inches=0)
+                    plt.close()
+
 
     def val(self):
         """Validate the model on a single minibatch
@@ -346,31 +422,6 @@ class Trainer:
 
         return reprojection_loss
 
-    def compute_losses(self, inputs, outputs):
-        """Compute the reprojection and smoothness losses for a minibatch
-        """
-        losses = {}
-        total_loss = 0
-
-        for scale in self.opt.scales:
-            closs = torch.zeros_like(outputs[('depth', 0)])
-            ccount = torch.zeros_like(outputs[('depth', 0)])
-            for k in inputs['imgr'].keys():
-                if k == 0:
-                    continue
-                closs += self.compute_reprojection_loss(pred=outputs['reconImgs', scale][k], target=inputs['imgr'][0]) * outputs['occmaskrec'][k]
-                ccount += outputs['occmaskrec'][k]
-            avecloss = closs / (ccount + 1e-5)
-
-            if scale == 0:
-                outputs['avecloss'] = avecloss
-
-            losses['closs', scale] = torch.sum(avecloss) / (torch.sum(avecloss > 0) + 1)
-            total_loss += losses['closs', scale]
-
-        total_loss = total_loss / len(self.opt.scales)
-        losses['total_loss'] = total_loss
-        return losses
 
     def compute_depth_losses(self, inputs, outputs, losses):
         """Compute depth metrics, to allow monitoring during training
@@ -404,31 +455,6 @@ class Trainer:
         print_string = "epoch {:>3} | batch {:>6} | examples/s: {:5.1f}" + " | loss: {:.5f} | time elapsed: {} | time left: {}"
         print(print_string.format(self.epoch, batch_idx, samples_per_sec, loss, sec_to_hm_str(time_sofar), sec_to_hm_str(training_time_left)))
 
-    def log(self, mode, inputs, outputs, losses, dovls=False):
-        """Write an event to the tensorboard events file
-        """
-        writer = self.writers[mode]
-        for l, v in losses.items():
-            writer.add_scalar("{}".format(l), v, self.step)
-
-        if mode == 'val':
-            return
-
-        if dovls:
-            imgreconc = list()
-            for k in range(-self.opt.inDualDirFrames, self.opt.inDualDirFrames + 1):
-                if k == 0:
-                    imgreconc.append(np.array(tensor2rgb(inputs['imgr'][k], viewind=0)))
-                else:
-                    imgrecon = np.array(tensor2rgb(outputs['reconImgs', 0][k], viewind=0))
-                    imgocc = outputs['occmaskrec'][k][0].squeeze().cpu().numpy()
-                    imgrecon = imgrecon * np.expand_dims(imgocc, axis=2)
-                    imgrecon = imgrecon.astype(np.uint8)
-                    imgreconc.append(imgrecon)
-            imgreconc.append(np.array(tensor2disp(1 / outputs[('depth', 0)], percentile=95, viewind=0)))
-            imgreconc.append(np.array(tensor2disp(outputs['avecloss'], vmax=0.5, viewind=0)))
-            imgreconc = np.concatenate(imgreconc, axis=0)
-            writer.add_image('"img_recon"', (torch.from_numpy(imgreconc).float() / 255).permute([2, 0, 1]), self.step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
