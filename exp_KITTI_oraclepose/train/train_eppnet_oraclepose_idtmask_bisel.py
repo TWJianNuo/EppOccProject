@@ -326,7 +326,12 @@ class Trainer:
         for k in inputs['imgr'].keys():
             if k == 0:
                 continue
-            occmaskrec[k] = (self.sod(inputs['intrinsic'], inputs['poser'][k], outputs[("depth", 0)], float(1e10)) == 0).float()
+            if not self.opt.set_bs:
+                occmaskrec[k] = (self.sod(inputs['intrinsic'], inputs['poser'][k], outputs[("depth", 0)], float(1e10)) == 0).float()
+                # tensor2disp(occmaskrec[k], vmax=1, viewind=0).show()
+            else:
+                occmaskrec[k] = (self.sod(inputs['intrinsic'], inputs['poser'][k], outputs[("depth", 0)], float(-1)) == 0).float()
+                # tensor2disp(occmaskrec[k], vmax=1, viewind=0).show()
         outputs['occmaskrec'] = occmaskrec
 
         # Compute Reconstruction image
@@ -574,6 +579,8 @@ if __name__ == "__main__":
                              type=int,
                              help="frames to load",
                              default=[0, -1, 1])
+    parser.add_argument("--set_bs",
+                        action='store_true')
 
     # OPTIMIZATION options
     parser.add_argument("--batch_size",
