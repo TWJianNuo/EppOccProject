@@ -142,6 +142,9 @@ class Trainer:
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
+        train_dataset = KITTI_eigen(entries=train_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
+                                    RANSACPose_root=self.opt.RANSACPose_root, inheight=self.opt.height, inwidth=self.opt.width, inDualDirFrames=args.inDualDirFrames, istrain=True, muteaug=False, isgarg=True)
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=True, num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
         val_dataset = KITTI_eigen(entries=val_filenames, dataset_root=self.opt.dataset_root, depthgt_root=self.opt.depthgt_root,
                                     RANSACPose_root=self.opt.RANSACPose_root, inheight=320, inwidth=1216, inDualDirFrames=0, istrain=False, muteaug=True, isgarg=True)
         self.val_loader = DataLoader(val_dataset, 1, shuffle=False, num_workers=self.opt.num_workers, pin_memory=True, drop_last=False)
@@ -158,6 +161,10 @@ class Trainer:
 
         self.depth_metric_names = [
             "de/abs_rel", "de/sq_rel", "de/rms", "de/log_rms", "da/a1", "da/a2", "da/a3"]
+
+        print("Using split:\n  ", self.opt.split)
+        print("There are {:d} training items and {:d} validation items\n".format(
+            len(train_dataset), len(val_dataset)))
 
         self.maxa1 = -1e10
         self.save_opts()
@@ -288,6 +295,22 @@ class Trainer:
         for i in range(9):
             losses[eval_measures_name[i]] = eval_measures_depth_nps[i]
 
+        if self.maxa1 < losses['d1']:
+            self.maxa1 = losses['d1']
+            self.best_measure = losses
+            self.save_model('besta1')
+
+        print('Best Performance:')
+        print("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}".format('silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3'))
+        for k, name in enumerate(eval_measures_name):
+            if k < 8:
+                print('{:7.3f}, '.format(self.best_measure[name]), end='')
+            else:
+                print('{:7.3f}'.format(self.best_measure[name]))
+
+        self.log('val', None, None, losses)
+        self.set_train()
+
     def generate_images_pred(self, inputs, outputs):
         """Generate the warped (reprojected) color images for a minibatch.
         Generated images are saved into the `outputs` dictionary.
@@ -330,19 +353,33 @@ class Trainer:
         total_loss = 0
 
         for scale in self.opt.scales:
-            closs = torch.zeros_like(outputs[('depth', 0)])
-            ccount = torch.zeros_like(outputs[('depth', 0)])
+            closs_forward = torch.zeros_like(outputs[('depth', 0)])
+            ccount_forward = torch.zeros_like(outputs[('depth', 0)])
+            closs_backward = torch.zeros_like(outputs[('depth', 0)])
+            ccount_backward = torch.zeros_like(outputs[('depth', 0)])
             for k in inputs['imgr'].keys():
                 if k == 0:
                     continue
-                closs += self.compute_reprojection_loss(pred=outputs['reconImgs', scale][k], target=inputs['imgr'][0]) * outputs['occmaskrec'][k]
-                ccount += outputs['occmaskrec'][k]
-            avecloss = closs / (ccount + 1e-5)
+                idt_loss = self.compute_reprojection_loss(pred=inputs['imgr'][k], target=inputs['imgr'][0])
+                recon_loss = self.compute_reprojection_loss(pred=outputs['reconImgs', scale][k], target=inputs['imgr'][0])
+                outputs['occmaskrec'][k] = outputs['occmaskrec'][k] * (recon_loss < idt_loss).float()
+                if k > 0:
+                    closs_forward += recon_loss * outputs['occmaskrec'][k]
+                    ccount_forward += outputs['occmaskrec'][k]
+                else:
+                    closs_backward += recon_loss * outputs['occmaskrec'][k]
+                    ccount_backward += outputs['occmaskrec'][k]
+
+            avecloss_forward = closs_forward / (ccount_forward + 1e-5)
+            avecloss_backward = closs_backward / (ccount_backward + 1e-5)
+
+            combined = torch.cat([avecloss_forward, avecloss_backward], dim=1)
+            to_optimise, idxs = torch.min(combined, dim=1, keepdim=True)
 
             if scale == 0:
-                outputs['avecloss'] = avecloss
+                outputs['avecloss'] = to_optimise
 
-            losses['closs', scale] = torch.sum(avecloss) / (torch.sum(avecloss > 0) + 1)
+            losses['closs', scale] = torch.sum(to_optimise) / (torch.sum(to_optimise > 0) + 1)
             total_loss += losses['closs', scale]
 
         total_loss = total_loss / len(self.opt.scales)
@@ -615,4 +652,4 @@ if __name__ == "__main__":
     args.log_dir = os.path.join(file_dir, args.log_dir)
 
     trainer = Trainer(args)
-    trainer.val()
+    trainer.train()
