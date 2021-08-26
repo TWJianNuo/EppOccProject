@@ -190,7 +190,7 @@ def read_splits():
         if os.path.exists(forward_flow_path) and os.path.exists(backward_flow_path):
             val_eval_entries.append(entry)
 
-    return val_train_entries, val_eval_entries
+    return train_entries, evaluation_entries
 
 def train(gpu, args):
     args.gpu = gpu
@@ -215,43 +215,43 @@ def train(gpu, args):
 
         seq, frmidx = data_blob['tag'][0].split(' ')
 
-        forward_flow_path = os.path.join(args.dualflow_root, seq, 'image_02/forward', '{}.png'.format(str(frmidx).zfill(10)))
-        backward_flow_path = os.path.join(args.dualflow_root, seq, 'image_02/backward', '{}.png'.format(str(frmidx).zfill(10)))
-        flowmap, _ = readFlowKITTI(forward_flow_path)
-        flowmap_back, _ = readFlowKITTI(backward_flow_path)
-        h, w, _ = flowmap.shape
+        # forward_flow_path = os.path.join(args.dualflow_root, seq, 'image_02/forward', '{}.png'.format(str(frmidx).zfill(10)))
+        # backward_flow_path = os.path.join(args.dualflow_root, seq, 'image_02/backward', '{}.png'.format(str(frmidx).zfill(10)))
+        # flowmap, _ = readFlowKITTI(forward_flow_path)
+        # flowmap_back, _ = readFlowKITTI(backward_flow_path)
+        # h, w, _ = flowmap.shape
+        #
+        # left = int((w - crpw) / 2)
+        # top = int(h - crph)
+        #
+        # flowmap = flowmap[top:top+crph, left:left+crpw]
+        # flowmap_back = flowmap_back[top:top+crph, left:left+crpw]
+        #
+        # flowmap = torch.from_numpy(flowmap).permute([2, 0, 1]).unsqueeze(0).float()
+        # flowmap_back = torch.from_numpy(flowmap_back).permute([2, 0, 1]).unsqueeze(0).float()
+        #
+        # xx, yy = np.meshgrid(list(range(crpw)), list(range(crph)))
+        # xx = torch.from_numpy(xx).unsqueeze(0).unsqueeze(0)
+        # yy = torch.from_numpy(yy).unsqueeze(0).unsqueeze(0)
+        # pts2d = torch.cat([xx, yy], dim=1)
+        # pts2d_f = pts2d + flowmap
+        #
+        # pts2d_f_normed = torch.clone(pts2d_f)
+        # pts2d_f_normed[:, 0] = 2*pts2d_f_normed[:, 0]/(crpw-1) - 1
+        # pts2d_f_normed[:, 1] = 2*pts2d_f_normed[:, 1]/(crph-1) - 1
+        # pts2d_f_normed = pts2d_f_normed.permute([0, 2, 3, 1])
+        # flowmap_back_b = F.grid_sample(flowmap_back, pts2d_f_normed, align_corners=True)
+        # flowmap_diff = flowmap + flowmap_back_b
+        # flowmap_diff = torch.sum(flowmap_diff.abs(), dim=1, keepdim=True)
+        # flowmap_diff_normed = flowmap_diff / torch.sqrt(torch.sum(flowmap ** 2, dim=1, keepdim=True) + 1e-6)
+        # figocc_cp = tensor2disp(flowmap_diff_normed > 1, vmax=1, viewind=0)
 
-        left = int((w - crpw) / 2)
-        top = int(h - crph)
-
-        flowmap = flowmap[top:top+crph, left:left+crpw]
-        flowmap_back = flowmap_back[top:top+crph, left:left+crpw]
-
-        flowmap = torch.from_numpy(flowmap).permute([2, 0, 1]).unsqueeze(0).float()
-        flowmap_back = torch.from_numpy(flowmap_back).permute([2, 0, 1]).unsqueeze(0).float()
-
-        xx, yy = np.meshgrid(list(range(crpw)), list(range(crph)))
-        xx = torch.from_numpy(xx).unsqueeze(0).unsqueeze(0)
-        yy = torch.from_numpy(yy).unsqueeze(0).unsqueeze(0)
-        pts2d = torch.cat([xx, yy], dim=1)
-        pts2d_f = pts2d + flowmap
-
-        pts2d_f_normed = torch.clone(pts2d_f)
-        pts2d_f_normed[:, 0] = 2*pts2d_f_normed[:, 0]/(crpw-1) - 1
-        pts2d_f_normed[:, 1] = 2*pts2d_f_normed[:, 1]/(crph-1) - 1
-        pts2d_f_normed = pts2d_f_normed.permute([0, 2, 3, 1])
-        flowmap_back_b = F.grid_sample(flowmap_back, pts2d_f_normed, align_corners=True)
-        flowmap_diff = flowmap + flowmap_back_b
-        flowmap_diff = torch.sum(flowmap_diff.abs(), dim=1, keepdim=True)
-        flowmap_diff_normed = flowmap_diff / torch.sqrt(torch.sum(flowmap ** 2, dim=1, keepdim=True) + 1e-6)
-        figocc_cp = tensor2disp(flowmap_diff_normed > 1, vmax=1, viewind=0)
-
-        occ_selector = sod(intrinsic.cuda(), posepred.cuda(), mD_pred.cuda(), float(5))
+        occ_selector = sod(intrinsic.cuda(), posepred.cuda(), mD_pred.cuda(), float(1e10))
         fig1 = tensor2rgb(image1, viewind=0)
         fig2 = tensor2rgb(image2, viewind=0)
         fig4 = tensor2disp(occ_selector.float(), vmax=1, viewind=0)
         fig5 = tensor2disp(1 / mD_pred, vmax=0.15, viewind=0)
-        fig_combined = np.concatenate([np.array(fig1), np.array(fig2), np.array(fig5), np.array(fig4), np.array(figocc_cp)], axis=0)
+        fig_combined = np.concatenate([np.array(fig1), np.array(fig5), np.array(fig4)], axis=0)
         Image.fromarray(fig_combined).save(os.path.join(args.vls_root, "{}_{}.png".format(seq.split('/')[1], frmidx)))
 
         # pose_np = posepred[0].squeeze().cpu().numpy()

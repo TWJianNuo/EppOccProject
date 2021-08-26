@@ -9,7 +9,7 @@ dev_selfocc_cuda_KITTI.py:
 
 
 dev_selfocc_cuda_KITTI.py:
---dataset_root /media/shengjie/disk1/data/Kitti --inheight 320 --inwidth 1216 --ins_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti_eigen_inspred --depth_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt --depthvlsgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --RANSACPose_root /media/shengjie/disk1/Prediction/pose_selfdecoders_nosoftmax_photoloss_selected/epoch_006 --vls_root /media/shengjie/disk1/visualization/EppOccProject/kitti_eigen_selfocc_cuda
+--dataset_root /media/shengjie/disk1/data/Kitti --inheight 320 --inwidth 1216 --ins_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti_eigen_inspred --depth_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt --depthvlsgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --RANSACPose_root /media/shengjie/disk1/Prediction/pose_selfdecoders_nosoftmax_photoloss_selected/epoch_006 --vls_root /media/shengjie/disk1/visualization/EppOccProject/kitti_eigen_selfocc_cuda --dualflow_root /media/shengjie/disk1/Prediction/EppOccProject/flow_forward_backward
 
 export_offshelf_KITTI_eigen_pose_bs.py:
 CUDA_VISIBLE_DEVICES=0 python ana_photometric_corr/ana_phhotometric_corr.py --dataset_root /media/shengjie/disk1/data/Kitti --odom_root /media/shengjie/disk1/data/Kitti --num_workers 0 --flowPred_root /media/shengjie/disk1/Prediction/kittieigen_RAFT_pred --mdGt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --pose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --vls_root_scatter /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatter --vls_root_scatterocc /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatterocc --vls_root_recon /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_recon --vls_root_errcurve /media/shengjie/disk1/visualization/EppOccProject/err_curve_all --samplenum 5000 --nprocs 4 --maxdiff 0.3
@@ -39,13 +39,172 @@ averaged:
 train_eppnet_oraclepose.py:
 --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 0 --batch_size 2 --learning_rate 1e-3 
 
-train_eppnet_oraclepose.py:
-CUDA_VISIBLE_DEVICES=1 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_4 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50
+CUDA_VISIBLE_DEVICES=1 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_4 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3/models/weights_0
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4 --port 4000
 
 CUDA_VISIBLE_DEVICES=2 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_3 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3 --port 4001
 
-CUDA_VISIBLE_DEVICES=3 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_2 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 2 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50
+CUDA_VISIBLE_DEVICES=3 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_2 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 2 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3/models/weights_0
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_2 --port 4002
 
-CUDA_VISIBLE_DEVICES=4 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_1 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50
+CUDA_VISIBLE_DEVICES=4 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_1 --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --num_layers 50 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3/models/weights_0
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_1 --port 4003
 
 scp /media/shengjie/other/Downloads/pose_offshelf_exsrh.tar zhusheng@cvl4.cse.msu.edu:/scratch1/zhusheng/EppOccProject
+
+train_eppnet_oraclepose.py:
+--model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 5 --num_workers 8 --batch_size 1 --height 320 --width 576 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/
+
+python ana_photometric_corr/ana_phhotometric_corr.py --dataset_root /media/shengjie/disk1/data/Kitti --odom_root /media/shengjie/disk1/data/Kitti --flowPred_root /media/shengjie/disk1/Prediction/kittieigen_RAFT_pred --mdGt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --pose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --vls_root_scatter /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatter --vls_root_scatterocc /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatterocc --vls_root_recon /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_recon --vls_root_errcurve /media/shengjie/disk1/visualization/EppOccProject/err_curve_all --tmp_restorage /media/shengjie/disk1/Prediction/EppOccProject/errcurve_tmp_restorage --nprocs 1 --maxdiff 0.25
+
+python ana_photometric_corr/ana_phhotometric_corr.py --dataset_root /media/shengjie/disk1/data/Kitti --odom_root /media/shengjie/disk1/data/Kitti --flowPred_root /media/shengjie/disk1/Prediction/kittieigen_RAFT_pred --mdGt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --pose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --vls_root_scatter /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatter --vls_root_scatterocc /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatterocc --vls_root_recon /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_recon --vls_root_errcurve /media/shengjie/disk1/visualization/EppOccProject/err_curve_all --tmp_restorage /media/shengjie/disk1/Prediction/EppOccProject/errcurve_tmp_restorage --nprocs 1 --maxdiff 0.3
+
+python ana_photometric_corr/ana_phhotometric_corr.py --dataset_root /media/shengjie/disk1/data/Kitti --odom_root /media/shengjie/disk1/data/Kitti --flowPred_root /media/shengjie/disk1/Prediction/kittieigen_RAFT_pred --mdGt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --pose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --vls_root_scatter /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatter --vls_root_scatterocc /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatterocc --vls_root_recon /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_recon --vls_root_errcurve /media/shengjie/disk1/visualization/EppOccProject/err_curve_all --tmp_restorage /media/shengjie/disk1/Prediction/EppOccProject/errcurve_tmp_restorage --nprocs 1 --maxdiff 0.4
+
+python ana_photometric_corr/ana_phhotometric_corr.py --dataset_root /media/shengjie/disk1/data/Kitti --odom_root /media/shengjie/disk1/data/Kitti --flowPred_root /media/shengjie/disk1/Prediction/kittieigen_RAFT_pred --mdGt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --pose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --mdPred_root /media/shengjie/disk1/Prediction/bts_depth_pred --vls_root_scatter /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatter --vls_root_scatterocc /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_scatterocc --vls_root_recon /media/shengjie/disk1/visualization/EppOccProject/pose_large_window_recon --vls_root_errcurve /media/shengjie/disk1/visualization/EppOccProject/err_curve_all --tmp_restorage /media/shengjie/disk1/Prediction/EppOccProject/errcurve_tmp_restorage --nprocs 1 --maxdiff 0.5
+
+photometric_regression.py:
+--model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 5 --num_workers 0 --batch_size 1 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/
+
+offline_photometric_loss_optimization.py:
+--model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 0 --batch_size 2 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/
+
+CUDA_VISIBLE_DEVICES=0 python exp_KITTI_oraclepose/analysis/offline_photometric_loss_optimization.py --model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 0 --batch_size 2 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/
+
+CUDA_VISIBLE_DEVICES=1 python exp_KITTI_oraclepose/analysis/offline_photometric_loss_optimization.py --model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 0 --batch_size 2 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/
+
+scp /media/shengjie/other/Downloads/mono+stereo_1024x320.zip zhusheng@cvl4.cse.msu.edu:/research/cvl-zhusheng/EppOccProject/experiments_log
+
+CUDA_VISIBLE_DEVICES=0 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_4_p --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/mono+stereo_1024x320 --learning_rate 2e-5
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4 --port 4004
+
+CUDA_VISIBLE_DEVICES=4 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_3_p --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/mono+stereo_1024x320 --learning_rate 2e-5
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3 --port 4005
+
+CUDA_VISIBLE_DEVICES=5 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_2_p --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 2 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/mono+stereo_1024x320 --learning_rate 2e-5
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_2 --port 4006
+
+CUDA_VISIBLE_DEVICES=7 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose.py --model_name frmnum_1_p --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/mono+stereo_1024x320 --learning_rate 2e-5
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_1 --port 4007
+
+exp_KITTI_oraclepose/analysis/evaluation_only.py:
+--model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/ --batch_size 3 --height 320 --width 1024
+
+CUDA_VISIBLE_DEVICES=3 python exp_KITTI_oraclepose/analysis/evaluation_only.py --model_name tmp --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/raw_lidar_scanned_depth --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_1_p/models/besta1 --learning_rate 2e-5
+
+CUDA_VISIBLE_DEVICES=3 python exp_KITTI_oraclepose/analysis/evaluation_only.py --model_name tmp --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/raw_lidar_scanned_depth --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --load_weights_folder /research/cvl-zhusheng/EppOccProject/experiments_log/mono+stereo_1024x320 --learning_rate 2e-5
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+ 12.575,   0.092,   0.039,   3.533,   0.437,   0.129,   0.925,   0.987,   0.997
+
+exp_KITTI_oraclepose/analysis/evaluation_only.py:
+--model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono_1024x320/ --batch_size 3 --height 320 --width 1024
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+ 19.676,   0.129,   0.056,   4.895,   0.955,   0.199,   0.865,   0.961,   0.982
+
+exp_KITTI_oraclepose/analysis/evaluation_only.py:
+ --model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/mono+stereo_1024x320/ --batch_size 3 --height 320 --width 1024
+   silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+ 19.458,   0.122,   0.054,   4.855,   0.910,   0.197,   0.873,   0.960,   0.981
+
+CUDA_VISIBLE_DEVICES=0 python exp_KITTI_oraclepose/analysis/offline_photometric_loss_optimization_init.py --model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 0 --batch_size 2 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/init/models/init
+
+CUDA_VISIBLE_DEVICES=1 python exp_KITTI_oraclepose/analysis/offline_photometric_loss_optimization_init.py --model_name mdp --log_dir experiments_log --dataset_root /media/shengjie/disk1/data/Kitti --depthgt_root /home/shengjie/Documents/Data/Kitti/filtered_lidar --RANSACPose_root /media/shengjie/disk1/Prediction/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 0 --batch_size 2 --height 320 --width 1216 --load_weights_folder /home/shengjie/Documents/supporting_projects/EppOccProject/experiments_log/init/models/init
+
+CUDA_VISIBLE_DEVICES=0 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask.py --model_name frmnum_4_idt --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4_idt --port 4004
+
+CUDA_VISIBLE_DEVICES=4 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask.py --model_name frmnum_3_idt --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3_idt --port 4005
+
+CUDA_VISIBLE_DEVICES=5 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask.py --model_name frmnum_2_idt --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 2 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_2_idt --port 4006
+
+CUDA_VISIBLE_DEVICES=7 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask.py --model_name frmnum_1_idt --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_1_idt --port 4007
+
+CUDA_VISIBLE_DEVICES=2 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask.py --model_name frmnum_1_idt_bs --log_dir experiments_log --dataset_root /scratch1/kitti_data --depthgt_root /scratch1/zhusheng/semidense_gt --RANSACPose_root /scratch1/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --set_bs
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4_idt --port 4004
+
+
+CUDA_VISIBLE_DEVICES=1 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask_bisel.py --model_name frmnum_4_idt_bisel --log_dir experiments_log --dataset_root /localscratch/kitti_data --depthgt_root /localscratch/zhusheng/semidense_gt --RANSACPose_root /localscratch/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 4 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4_idt --port 4004
+
+CUDA_VISIBLE_DEVICES=2 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask_bisel.py --model_name frmnum_3_idt_bisel --log_dir experiments_log --dataset_root /localscratch/kitti_data --depthgt_root /localscratch/zhusheng/semidense_gt --RANSACPose_root /localscratch/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 3 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_3_idt --port 4005
+
+CUDA_VISIBLE_DEVICES=3 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask_bisel.py --model_name frmnum_2_idt_bisel --log_dir experiments_log --dataset_root /localscratch/kitti_data --depthgt_root /localscratch/zhusheng/semidense_gt --RANSACPose_root /localscratch/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 2 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_2_idt --port 4006
+
+CUDA_VISIBLE_DEVICES=4 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask_bisel.py --model_name frmnum_1_idt_bisel --log_dir experiments_log --dataset_root /localscratch/kitti_data --depthgt_root /localscratch/zhusheng/semidense_gt --RANSACPose_root /localscratch/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_1_idt --port 4007
+
+CUDA_VISIBLE_DEVICES=7 python exp_KITTI_oraclepose/train/train_eppnet_oraclepose_idtmask_bisel.py --model_name frmnum_1_idt_bs_bisel --log_dir experiments_log --dataset_root /localscratch/kitti_data --depthgt_root /localscratch/zhusheng/semidense_gt --RANSACPose_root /localscratch/zhusheng/EppOccProject/pose_offshelf_exsrh --inDualDirFrames 1 --num_workers 8 --batch_size 4 --height 320 --width 576 --set_bs
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/EppOccProject/experiments_log/frmnum_4_idt --port 4004
+
+scp /media/shengjie/other/Downloads/pose_offshelf_exsrh.tar zhusheng@cvl5.cse.msu.edu:/localscratch/zhusheng/EppOccProject
+
+PENet_ICRA2021/main.py
+CUDA_VISIBLE_DEVICES=0 python main.py -b 1 -n e --evaluate /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/pretrained_models/e.pth.tar --data-folder /media/shengjie/disk1/data/kitti_depthcompletion
+
+CUDA_VISIBLE_DEVICES=0 python main.py -b 1 -n pe --evaluate /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/pretrained_models/pe.pth.tar --data-folder /media/shengjie/disk1/data/kitti_depthcompletion
+
+analyse_raw_depthmap_consistency.py:
+--raw_root /media/shengjie/disk1/data/Kitti --my_raw_depthmap /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --official_raw_depthmap /media/shengjie/disk1/data/kitti_depthcompletion/data_depth_velodyne --my_clean_depthmap /home/shengjie/Documents/Data/Kitti/filtered_lidar --vls_root /media/shengjie/disk1/visualization/EppOccProject/raw_depth_consistency_check --semidense_depthmap1 /media/shengjie/disk1/data/kitti_depthcompletion/data_depth_annotated --semidense_depthmap2 /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/semidense_gt
+perform_my_clean1:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  3.717,   0.013,   0.006,   0.978,   0.036,   0.038,   0.996,   0.999,   0.999
+perform_my_raw1:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  8.351,   0.042,   0.016,   1.869,   0.277,   0.089,   0.985,   0.991,   0.994
+perform_official_raw1:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  5.593,   0.011,   0.004,   1.228,   0.128,   0.057,   0.993,   0.996,   0.998
+=================================
+perform_my_clean2:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  3.717,   0.013,   0.006,   0.978,   0.036,   0.038,   0.996,   0.999,   0.999
+perform_my_raw2:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  8.351,   0.042,   0.016,   1.869,   0.277,   0.089,   0.985,   0.991,   0.994
+perform_official_raw2:
+  silog, abs_rel,   log10,     rms,  sq_rel, log_rms,      d1,      d2,      d3
+  5.593,   0.011,   0.004,   1.228,   0.128,   0.057,   0.993,   0.996,   0.998
+
+PENet_ICRA2021/main.py:
+CUDA_VISIBLE_DEVICES=0,1 python main.py -b 6 -n e --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --data-folder-rgb /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/kitti_raw --workers 0 --select_raw mine --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar --val full --name enet_official --resume /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/pretrained_models/e.pth.tar
+
+CUDA_VISIBLE_DEVICES=0 python main.py -b 1 -n e --evaluate /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/pretrained_models/e.pth.tar --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --select_raw mine --val full --data-folder-rgb /media/shengjie/disk1/data/Kitti --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar
+
+CUDA_VISIBLE_DEVICES=0,1 python main.py -b 6 -n e --name enet_official --data-folder /scratch1/zhusheng/EppOccProject/kitti_depthcompletion --data-folder-rgb /scratch1/kitti_data --workers 8 --select_raw official --mine_raw_path /scratch1/zhusheng/raw_lidar_scanned_depth --cleaned_raw_path /scratch1/zhusheng/filtered_lidar --val full 
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/PENet_modified/experiments_log/enet_official --port 4100
+
+CUDA_VISIBLE_DEVICES=2,3 python main.py -b 6 -n e --name enet_mine --data-folder /scratch1/zhusheng/EppOccProject/kitti_depthcompletion --data-folder-rgb /scratch1/kitti_data --workers 8 --select_raw mine --mine_raw_path /scratch1/zhusheng/raw_lidar_scanned_depth --cleaned_raw_path /scratch1/zhusheng/filtered_lidar --val full
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/PENet_modified/experiments_log/enet_mine --port 4101
+
+CUDA_VISIBLE_DEVICES=4,5 python main.py -b 6 -n e --name enet_cleaned --data-folder /scratch1/zhusheng/EppOccProject/kitti_depthcompletion --data-folder-rgb /scratch1/kitti_data --workers 8 --select_raw cleaned --mine_raw_path /scratch1/zhusheng/raw_lidar_scanned_depth --cleaned_raw_path /scratch1/zhusheng/filtered_lidar --val full
+python3 -m tensorboard.main --logdir=/research/cvl-zhusheng/PENet_modified/experiments_log/enet_cleaned --port 4102
+
+scp zhusheng@cvl5.cse.msu.edu:/research/cvl-zhusheng/PENet_modified/experiments_log/enet_cleaned /media/shengjie/other/Downloads/pose_offshelf_exsrh.tar
+
+CUDA_VISIBLE_DEVICES=0,1 python analysis/generate_DC_predictions.py -b 6 -n e --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --data-folder-rgb /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/kitti_raw --workers 0 --select_raw official --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar --val full --name enet_official --resume /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/enet_official/model_best.pth.tar
+Val Epoch: 0 [800/800]  lr=0 t_Data=0.002(0.002) t_GPU=0.018(0.017)
+  RMSE=780.08(780.08) MAE=219.50(219.50) iRMSE=2.17(2.17) iMAE=0.94(0.94)
+  silog=2.76(2.76) squared_rel=0.00(0.00) Delta1=0.998(0.998) REL=0.012(0.012)
+  Lg10=0.005(0.005) Photometric=0.000(0.000) 
+
+CUDA_VISIBLE_DEVICES=0,1 python analysis/generate_DC_predictions.py -b 6 -n e --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --data-folder-rgb /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/kitti_raw --workers 0 --select_raw mine --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar --val full --name enet_official --resume /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/enet_mine/model_best.pth.tar
+Val Epoch: 0 [800/800]  lr=0 t_Data=0.002(0.002) t_GPU=0.019(0.018)
+  RMSE=824.41(824.41) MAE=248.68(248.68) iRMSE=2.49(2.49) iMAE=1.12(1.12)
+  silog=3.02(3.02) squared_rel=0.00(0.00) Delta1=0.998(0.998) REL=0.014(0.014)
+  Lg10=0.006(0.006) Photometric=0.000(0.000) 
+
+CUDA_VISIBLE_DEVICES=0,1 python analysis/generate_DC_predictions.py -b 6 -n e --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --data-folder-rgb /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/kitti_raw --workers 0 --select_raw cleaned --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar --val full --name enet_official --resume /home/shengjie/Documents/supporting_projects/PENet_ICRA2021/experiments_log/enet_cleaned/model_best.pth.tar
+Val Epoch: 0 [800/800]  lr=0 t_Data=0.002(0.002) t_GPU=0.020(0.019)
+  RMSE=835.39(835.39) MAE=247.50(247.50) iRMSE=2.50(2.50) iMAE=1.12(1.12)
+  silog=3.01(3.01) squared_rel=0.00(0.00) Delta1=0.998(0.998) REL=0.013(0.013)
+  Lg10=0.006(0.006) Photometric=0.000(0.000) 
+
+CUDA_VISIBLE_DEVICES=0,1 python analysis/generate_DC_predictions.py -b 6 -n e --data-folder /media/shengjie/disk1/data/kitti_depthcompletion --data-folder-rgb /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/kitti_raw --workers 0 --mine_raw_path /media/shengjie/c9c81c9f-511c-41c6-bfe0-2fc19666fb32/Data/kitti/unprocessed_raw_lidar_mapped_depth --cleaned_raw_path /home/shengjie/Documents/Data/Kitti/filtered_lidar --val full --name enet_official --pred_root /media/shengjie/disk1/Prediction/EppOccProject/depthCompletion_inputs_contrast
+
+python analysis/generate_vls.py --pred_root /media/shengjie/disk1/Prediction/EppOccProject/depthCompletion_inputs_contrast --vls_root /media/shengjie/disk1/Prediction/EppOccProject/depthCompletion_inputs_contrast/vls

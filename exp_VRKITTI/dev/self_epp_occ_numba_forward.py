@@ -273,15 +273,17 @@ if __name__ == '__main__':
         flowmap_back_b = F.grid_sample(flowmap_back, pts2d_f_normed, align_corners=True)
         flowmap_diff = flowmap + flowmap_back_b
         flowmap_diff = torch.sum(flowmap_diff.abs(), dim=1, keepdim=True)
+        flowmap_diff_normed = flowmap_diff / torch.sqrt(torch.sum(flowmap ** 2, dim=1, keepdim=True) + 1e-10)
 
         # Inference
-        occ_selector = occ_detect_c(intrinsic=intrinsic_np, pose=pose_np, depthmap=depthmap_np, minoc_dist=1e6)
+        occ_selector = occ_detect_c(intrinsic=intrinsic_np, pose=pose_np, depthmap=depthmap_np, minoc_dist=5)
 
         fig1 = tensor2rgb(data_blob['img1'].unsqueeze(0), viewind=0)
-        fig2 = tensor2rgb(data_blob['img2'].unsqueeze(0), viewind=0)
+        # fig2 = tensor2rgb(data_blob['img2'].unsqueeze(0), viewind=0)
         fig3 = tensor2disp(torch.from_numpy(occ_selector).unsqueeze(0).unsqueeze(0), vmax=1, viewind=0)
-        fig5 = tensor2disp(flowmap_diff > 1, vmax=1, viewind=0)
-        fig_combined = np.concatenate([np.array(fig1), np.array(fig2), np.array(fig3), np.array(fig5)], axis=0)
+        fig4 = tensor2disp(1 / depthmap, vmax=0.15, viewind=0)
+        fig5 = tensor2disp(flowmap_diff_normed > 0.8, vmax=1, viewind=0)
+        fig_combined = np.concatenate([np.array(fig1), np.array(fig4), np.array(fig3)], axis=0)
         Image.fromarray(fig_combined).save(os.path.join(args.vlsroot, "{}.png".format(tag)))
 
         if degbug:
